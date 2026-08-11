@@ -13,18 +13,18 @@ import (
 	"tiramisu/internal/stub"
 	"tiramisu/internal/warmup"
 
-	"github.com/winfsp/cgofuse"
+	"github.com/winfsp/cgofuse/fuse"
 )
 
-// TiramisuFS implements cgofuse.FileSystemInterface for torrent streaming.
+// TiramisuFS implements fuse.FileSystemInterface for torrent streaming.
 type TiramisuFS struct {
-	cgofuse.FileSystemBase
+	fuse.FileSystemBase
 	dataDir     string
 	raCache     *streaming.ReadAheadCache
 	client      streaming.NativeClient
 	handles     sync.Map // path -> *streaming.MkvHandle
 	metaCache   sync.Map // path -> *stub.StubMeta
-	host        *cgofuse.FileSystemHost
+	host        *fuse.FileSystemHost
 }
 
 // NewTiramisuFS creates a new FUSE filesystem.
@@ -38,7 +38,7 @@ func NewTiramisuFS(dataDir string, client streaming.NativeClient, raCache *strea
 
 // Mount starts the FUSE mount at the given point.
 func (fs *TiramisuFS) Mount(mountPoint string) {
-	fs.host = cgofuse.NewFileSystemHost(fs)
+	fs.host = fuse.NewFileSystemHost(fs)
 	log.Printf("[FUSE] Mounting at %s", mountPoint)
 	fs.host.Mount(mountPoint, nil)
 }
@@ -81,12 +81,12 @@ func (fs *TiramisuFS) resolvePath(path string) string {
 }
 
 // Getattr returns file/directory attributes.
-func (fs *TiramisuFS) Getattr(path string, stat *cgofuse.Stat_t, fh uint64) int {
+func (fs *TiramisuFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 	fullPath := fs.resolvePath(path)
 
 	if path == "/" || path == "" {
 		// Root directory
-		stat.Mode = cgofuse.S_IFDIR | 0755
+		stat.Mode = fuse.S_IFDIR | 0755
 		stat.Nlink = 1
 		stat.Blksize = 1048576
 		return 0
@@ -97,13 +97,13 @@ func (fs *TiramisuFS) Getattr(path string, stat *cgofuse.Stat_t, fh uint64) int 
 		meta, err := fs.getOrReadMeta(fullPath)
 		if err == nil {
 			stat.Size = meta.Size
-			stat.Mode = cgofuse.S_IFREG | 0644
+			stat.Mode = fuse.S_IFREG | 0644
 			stat.Nlink = 1
 			stat.Blksize = 1048576
 			stat.Blocks = (meta.Size + 511) / 512
-			stat.Mtim = cgofuse.NewTimespec(time.Now())
-			stat.Atim = cgofuse.NewTimespec(time.Now())
-			stat.Ctim = cgofuse.NewTimespec(time.Now())
+			stat.Mtim = fuse.NewTimespec(time.Now())
+			stat.Atim = fuse.NewTimespec(time.Now())
+			stat.Ctim = fuse.NewTimespec(time.Now())
 			return 0
 		}
 	}
@@ -111,33 +111,33 @@ func (fs *TiramisuFS) Getattr(path string, stat *cgofuse.Stat_t, fh uint64) int 
 	// Try as real file/directory
 	fi, err := os.Lstat(fullPath)
 	if err != nil {
-		return -cgofuse.ENOENT
+		return -fuse.ENOENT
 	}
 
 	if fi.IsDir() {
-		stat.Mode = cgofuse.S_IFDIR | 0755
+		stat.Mode = fuse.S_IFDIR | 0755
 		stat.Nlink = 1
 	} else {
 		stat.Size = fi.Size()
-		stat.Mode = cgofuse.S_IFREG | 0644
+		stat.Mode = fuse.S_IFREG | 0644
 		stat.Nlink = 1
 		stat.Blocks = (fi.Size() + 511) / 512
 	}
 
 	stat.Blksize = 1048576
-	stat.Mtim = cgofuse.NewTimespec(fi.ModTime())
-	stat.Atim = cgofuse.NewTimespec(fi.ModTime())
-	stat.Ctim = cgofuse.NewTimespec(fi.ModTime())
+	stat.Mtim = fuse.NewTimespec(fi.ModTime())
+	stat.Atim = fuse.NewTimespec(fi.ModTime())
+	stat.Ctim = fuse.NewTimespec(fi.ModTime())
 	return 0
 }
 
 // Readdir lists directory contents.
-func (fs *TiramisuFS) Readdir(path string, fills []cgofuse.DirEntry, off int64, fh uint64) int {
+func (fs *TiramisuFS) Readdir(path string, fills []fuse.DirEntry, off int64, fh uint64) int {
 	fullPath := fs.resolvePath(path)
 
 	entries, err := os.ReadDir(fullPath)
 	if err != nil {
-		return -cgofuse.ENOENT
+		return -fuse.ENOENT
 	}
 
 	idx := 0
@@ -148,7 +148,7 @@ func (fs *TiramisuFS) Readdir(path string, fills []cgofuse.DirEntry, off int64, 
 		// For directories, show them
 		if e.IsDir() || strings.HasSuffix(name, ".mkv") || strings.HasSuffix(name, ".torrent") {
 			if idx >= int(off) {
-				fills = append(fills, cgofuse.DirEntry{
+				fills = append(fills, fuse.DirEntry{
 					Name: name,
 				})
 			}
@@ -167,7 +167,7 @@ func (fs *TiramisuFS) Readdir(path string, fills []cgofuse.DirEntry, off int64, 
 					if strings.HasSuffix(se.Name(), ".mkv") {
 						name := d.Name() + "/" + se.Name()
 						if idx >= int(off) {
-							fills = append(fills, cgofuse.DirEntry{
+							fills = append(fills, fuse.DirEntry{
 								Name: name,
 							})
 						}
@@ -192,7 +192,7 @@ func (fs *TiramisuFS) Open(path string, flags uint64, fh uint64) (int, uint64) {
 
 	meta, err := fs.getOrReadMeta(fullPath)
 	if err != nil {
-		return -cgofuse.ENOENT, 0
+		return -fuse.ENOENT, 0
 	}
 
 	// Check if handle already exists
@@ -225,14 +225,14 @@ func (fs *TiramisuFS) Open(path string, flags uint64, fh uint64) (int, uint64) {
 func (fs *TiramisuFS) Read(path string, buf []byte, off int64, fh uint64) int {
 	val, ok := fs.handles.Load(path)
 	if !ok {
-		return -cgofuse.EBADF
+		return -fuse.EBADF
 	}
 
 	h := val.(*streaming.MkvHandle)
 	n, err := h.Read(buf, off)
 	if err != nil {
 		log.Printf("[FUSE] Read error for %s: %v", path, err)
-		return -cgofuse.EIO
+		return -fuse.EIO
 	}
 	return n
 }
@@ -247,7 +247,7 @@ func (fs *TiramisuFS) Release(path string, fh uint64) int {
 }
 
 // Statfs returns filesystem statistics.
-func (fs *TiramisuFS) Statfs(path string, statvfs *cgofuse.Statfs_t) int {
+func (fs *TiramisuFS) Statfs(path string, statvfs *fuse.Statfs_t) int {
 	statvfs.Bsize = 4096
 	statvfs.Blocks = 250 * 1024 * 1024 // 1TB
 	statvfs.Bfree = 125 * 1024 * 1024

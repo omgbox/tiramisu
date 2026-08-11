@@ -3,13 +3,18 @@ package vfs
 import (
 	"sync"
 	"time"
-
-	"github.com/hanwen/go-fuse/v2/fuse"
 )
+
+// DirEntry represents a directory entry (replaces go-fuse/v2/fuse.DirEntry).
+type DirEntry struct {
+	Ino  uint64
+	Name string
+	Mode uint32
+}
 
 // DirCacheEntry holds cached directory entries
 type DirCacheEntry struct {
-	Entries   []fuse.DirEntry
+	Entries   []DirEntry
 	ExpiresAt time.Time
 }
 
@@ -29,7 +34,7 @@ func NewDirCache(ttl time.Duration) *DirCache {
 }
 
 // Get retrieves entries for a path if they exist and aren't expired
-func (dc *DirCache) Get(path string) ([]fuse.DirEntry, bool) {
+func (dc *DirCache) Get(path string) ([]DirEntry, bool) {
 	dc.mu.RLock()
 	entry, exists := dc.cache[path]
 	dc.mu.RUnlock()
@@ -39,7 +44,6 @@ func (dc *DirCache) Get(path string) ([]fuse.DirEntry, bool) {
 	}
 
 	if time.Now().After(entry.ExpiresAt) {
-		// Lazy cleanup
 		dc.Delete(path)
 		return nil, false
 	}
@@ -48,12 +52,11 @@ func (dc *DirCache) Get(path string) ([]fuse.DirEntry, bool) {
 }
 
 // Put stores entries for a path
-func (dc *DirCache) Put(path string, entries []fuse.DirEntry) {
+func (dc *DirCache) Put(path string, entries []DirEntry) {
 	dc.mu.Lock()
 	defer dc.mu.Unlock()
 
-	// Make a copy to prevent mutation issues (though DirEntry is value type, slice is ref)
-	entriesCopy := make([]fuse.DirEntry, len(entries))
+	entriesCopy := make([]DirEntry, len(entries))
 	copy(entriesCopy, entries)
 
 	dc.cache[path] = DirCacheEntry{
@@ -62,14 +65,14 @@ func (dc *DirCache) Put(path string, entries []fuse.DirEntry) {
 	}
 }
 
-// Delete removes an entry (used for invalidation)
+// Delete removes an entry
 func (dc *DirCache) Delete(path string) {
 	dc.mu.Lock()
 	delete(dc.cache, path)
 	dc.mu.Unlock()
 }
 
-// CleanupExpired purges expired entries (can be called periodically)
+// CleanupExpired purges expired entries
 func (dc *DirCache) CleanupExpired() {
 	dc.mu.Lock()
 	defer dc.mu.Unlock()
@@ -81,6 +84,3 @@ func (dc *DirCache) CleanupExpired() {
 		}
 	}
 }
-
-// Global instance
-
