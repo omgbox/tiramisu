@@ -46,10 +46,10 @@ jobs:
           GOARCH: amd64
           CPATH: "C:\\Program Files (x86)\\WinFsp\\inc\\fuse"
         run: |
+          go mod tidy
           go build -o tiramisu.exe -ldflags="-s -w" .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Write-Host "Build successful"
-          .\tiramisu.exe
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

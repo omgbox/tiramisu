@@ -28,7 +28,9 @@ jobs:
         env:
           CGO_ENABLED: 1
           CPATH: "C:\\Program Files (x86)\\WinFsp\\inc\\fuse"
-        run: go test ./... -v -count=1 -short -timeout 60s
+        run: |
+          go mod tidy
+          go test ./... -v -count=1 -short -timeout 60s
 
       - name: Integration Tests
         env:
