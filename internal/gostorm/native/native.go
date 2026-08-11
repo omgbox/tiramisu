@@ -262,8 +262,8 @@ func (r *NativeReader) Interrupt() {
 }
 
 func (r *NativeReader) startStream(off int64) error {
-	// V255: Use PeekTorrent to avoid extending expiry timer on every Hard Seek.
-	t := torr.PeekTorrent(r.hash)
+	// Use GetTorrent to ensure the torrent is active (checks both RAM and DB).
+	t := torr.GetTorrent(r.hash)
 	if t == nil || t.Torrent == nil {
 		return fmt.Errorf("torrent not found")
 	}
@@ -338,8 +338,8 @@ func (r *NativeReader) IsIdle(d time.Duration) bool {
 
 // FetchBlock performs an atomic, stateless read from the Torrent Core.
 func (c *NativeClient) FetchBlock(hash string, fileID int, offset int64, p []byte) (int, error) {
-	// V255: Use PeekTorrent — same reasoning as startStream above.
-	t := torr.PeekTorrent(hash)
+	// Use GetTorrent to ensure the torrent is active (checks both RAM and DB).
+	t := torr.GetTorrent(hash)
 	if t == nil || t.Torrent == nil {
 		return 0, fmt.Errorf("torrent not found")
 	}

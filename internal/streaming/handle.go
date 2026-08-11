@@ -43,7 +43,7 @@ type HandleConfig struct {
 	Cache  *ReadAheadCache
 }
 
-// NewHandle creates and starts a new MkvHandle.
+// NewHandle creates a new MkvHandle and initializes the persistent NativeReader.
 func NewHandle(cfg HandleConfig) *MkvHandle {
 	h := &MkvHandle{
 		path:             cfg.Path,
@@ -63,13 +63,17 @@ func NewHandle(cfg HandleConfig) *MkvHandle {
 	if cfg.Client != nil && cfg.Magnet != "" {
 		if err := cfg.Client.Wake(cfg.Magnet, cfg.FileID); err != nil {
 			log.Printf("[Handle] Wake failed for %s: %v", cfg.Path, err)
+		} else {
+			// Create persistent reader after Wake succeeds
+			h.reader = cfg.Client.NewStreamReader(cfg.Hash, cfg.FileID, cfg.Size)
+			log.Printf("[Handle] Reader created for %s (size=%d)", cfg.Path, cfg.Size)
 		}
 	}
 
 	return h
 }
 
-// Read serves data from cache or fetches from torrent.
+// Read serves data from cache or fetches from torrent via persistent reader.
 func (h *MkvHandle) Read(buf []byte, offset int64) (int, error) {
 	h.lastActivityTime = time.Now()
 	atomic.StoreInt64(&h.lastOff, offset)
@@ -85,17 +89,16 @@ func (h *MkvHandle) Read(buf []byte, offset int64) (int, error) {
 		return n, nil
 	}
 
-	// Cache miss — FetchBlock fallback
-	if h.client == nil {
-		return 0, ErrNoClient
+	// Cache miss — use persistent NativeReader
+	if h.reader == nil {
+		return 0, ErrNoReader
 	}
 
-	n, err := fetchBlockWithRetry(h.client, h.hash, h.fileID, offset, buf, 3)
+	n, err := h.reader.ReadAt(buf, offset)
 	if err != nil {
 		return 0, err
 	}
 
-	// Write back to cache
 	if n > 0 {
 		h.raCache.Put(h.path, offset, buf[:n])
 	}
@@ -112,6 +115,12 @@ func (h *MkvHandle) Release() {
 		return
 	}
 	h.closed = true
+
+	// Close persistent reader
+	if h.reader != nil {
+		h.reader.Close()
+		h.reader = nil
+	}
 
 	// Save player position to pump state
 	if h.pump != nil && h.pump.state != nil {
@@ -132,4 +141,7 @@ func (h *MkvHandle) IsActive(timeout time.Duration) bool {
 }
 
 // Errors
-var ErrNoClient = fmt.Errorf("no torrent client configured")
+var (
+	ErrNoClient = fmt.Errorf("no torrent client configured")
+	ErrNoReader = fmt.Errorf("no torrent reader (Wake may have failed)")
+)

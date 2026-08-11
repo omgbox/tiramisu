@@ -30,10 +30,10 @@ jobs:
           CPATH: "C:\\Program Files (x86)\\WinFsp\\inc\\fuse"
         run: |
           go mod tidy
-          go test -tags=disable_libutp $(go list ./... | Where-Object { $_ -notmatch 'natpmp|registry|gostorm/torr/storage/torrstor' }) -v -count=1 -short -timeout 60s
+          go test -tags="disable_libutp,noboltdb" $(go list -tags="disable_libutp,noboltdb" ./... | Where-Object { $_ -notmatch 'natpmp|registry|gostorm/torr/storage/torrstor' }) -v -count=1 -short -timeout 60s
 
       - name: Integration Tests
         env:
           CGO_ENABLED: 1
           CPATH: "C:\\Program Files (x86)\\WinFsp\\inc\\fuse"
-        run: go test -tags=disable_libutp $(go list ./... | Where-Object { $_ -notmatch 'natpmp|registry|gostorm/torr/storage/torrstor' }) -v -count=1 -run Integration -timeout 120s
+        run: go test -tags="disable_libutp,noboltdb" $(go list -tags="disable_libutp,noboltdb" ./... | Where-Object { $_ -notmatch 'natpmp|registry|gostorm/torr/storage/torrstor' }) -v -count=1 -run Integration -timeout 120s
