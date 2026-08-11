@@ -51,17 +51,22 @@ jobs:
           GOOS: windows
           GOARCH: amd64
           CPATH: "C:\\Program Files (x86)\\WinFsp\\inc\\fuse"
+          CGO_LDFLAGS: "-static"
           GOFLAGS: "-tags=disable_libutp"
         run: |
-          go build -o tiramisu.exe -ldflags="-s -w" -tags=disable_libutp .
+          go build -o tiramisu.exe -ldflags="-s -w -extldflags '-static'" -tags=disable_libutp .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Write-Host "Build successful"
+          # Also bundle WinFsp DLL for FUSE support at runtime
+          Copy-Item "C:\Program Files (x86)\WinFsp\bin\winfsp-x64.dll" . -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: tiramisu-windows-amd64
-          path: tiramisu.exe
+          path: |
+            tiramisu.exe
+            winfsp-x64.dll
           retention-days: 30
 
       - name: Release
