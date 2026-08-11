@@ -414,18 +414,36 @@ func (c *NativeClient) FindFileID(hash string, filePath string) (int, error) {
 		return 0, fmt.Errorf("torrent metadata not ready")
 	}
 	st := t.Status()
-	log.Printf("[FindFileID] Looking for %q among %d files:", filePath, len(st.FileStats))
-	for _, fs := range st.FileStats {
-		if fs != nil {
-			log.Printf("[FindFileID]   id=%d path=%q len=%d", fs.Id, fs.Path, fs.Length)
-		}
-	}
+
+	// Exact match first
 	for _, fs := range st.FileStats {
 		if fs != nil && fs.Path == filePath {
 			log.Printf("[FindFileID] Matched: id=%d path=%q", fs.Id, fs.Path)
 			return fs.Id, nil
 		}
 	}
+
+	// Suffix match: torrent paths include dir prefix (e.g. "Sintel/Sintel.mp4")
+	// but stubs store just the filename ("Sintel.mp4")
+	for _, fs := range st.FileStats {
+		if fs != nil && len(fs.Path) > len(filePath) && fs.Path[len(fs.Path)-len(filePath):] == filePath {
+			log.Printf("[FindFileID] Suffix matched: id=%d path=%q for %q", fs.Id, fs.Path, filePath)
+			return fs.Id, nil
+		}
+	}
+
+	// Also try matching with the torrent name as prefix
+	if t.Torrent != nil && t.Torrent.Info() != nil {
+		prefix := t.Torrent.Info().Name + "/"
+		prefixed := prefix + filePath
+		for _, fs := range st.FileStats {
+			if fs != nil && fs.Path == prefixed {
+				log.Printf("[FindFileID] Prefixed matched: id=%d path=%q for %q", fs.Id, fs.Path, filePath)
+				return fs.Id, nil
+			}
+		}
+	}
+
 	return 0, fmt.Errorf("file %q not found in torrent", filePath)
 }
 
