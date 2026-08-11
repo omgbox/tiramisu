@@ -410,12 +410,19 @@ func (c *NativeClient) FindFileID(hash string, filePath string) (int, error) {
 	if t == nil || t.Torrent == nil {
 		return 0, fmt.Errorf("torrent not found")
 	}
-	if !t.GotInfo() {
+	if t.Torrent.Info() == nil {
 		return 0, fmt.Errorf("torrent metadata not ready")
 	}
 	st := t.Status()
+	log.Printf("[FindFileID] Looking for %q among %d files:", filePath, len(st.FileStats))
+	for _, fs := range st.FileStats {
+		if fs != nil {
+			log.Printf("[FindFileID]   id=%d path=%q len=%d", fs.Id, fs.Path, fs.Length)
+		}
+	}
 	for _, fs := range st.FileStats {
 		if fs != nil && fs.Path == filePath {
+			log.Printf("[FindFileID] Matched: id=%d path=%q", fs.Id, fs.Path)
 			return fs.Id, nil
 		}
 	}
