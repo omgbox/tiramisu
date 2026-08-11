@@ -24,7 +24,7 @@ jobs:
         shell: pwsh
         run: |
           $version = "2.1"
-          $build = "25054"
+          $build = "25156"
           $url = "https://github.com/winfsp/winfsp/releases/download/v${version}/winfsp-${version}.${build}.msi"
           Write-Host "Downloading WinFsp SDK from $url"
           Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\winfsp.msi"
