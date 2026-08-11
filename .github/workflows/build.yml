@@ -39,6 +39,12 @@ jobs:
             exit 1
           }
 
+      - name: Tidy modules
+        env:
+          CGO_ENABLED: 1
+          CPATH: "C:\\Program Files (x86)\\WinFsp\\inc\\fuse"
+        run: go mod tidy
+
       - name: Build
         env:
           CGO_ENABLED: 1
@@ -46,7 +52,6 @@ jobs:
           GOARCH: amd64
           CPATH: "C:\\Program Files (x86)\\WinFsp\\inc\\fuse"
         run: |
-          go mod tidy
           go build -o tiramisu.exe -ldflags="-s -w" .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Write-Host "Build successful"
