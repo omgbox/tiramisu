@@ -119,7 +119,13 @@ func (fs *TiramisuFS) Readdir(path string, fill func(name string, stat *fuse.Sta
 		name := e.Name()
 		if e.IsDir() || strings.HasSuffix(name, ".mkv") || strings.HasSuffix(name, ".torrent") {
 			if idx >= off {
-				if !fill(name, nil, idx) {
+				stat := &fuse.Stat_t{}
+				if e.IsDir() {
+					stat.Mode = fuse.S_IFDIR | 0755
+				} else {
+					stat.Mode = fuse.S_IFREG | 0644
+				}
+				if !fill(name, stat, idx) {
 					break
 				}
 			}
