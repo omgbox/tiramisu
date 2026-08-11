@@ -22,7 +22,7 @@ jobs:
           $build = "25156"
           $url = "https://github.com/winfsp/winfsp/releases/download/v${version}/winfsp-${version}.${build}.msi"
           Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\winfsp.msi"
-          Start-Process msiexec.exe -Wait -ArgumentList "/i", "$env:TEMP\winfsp.msi", "/qn"
+          Start-Process msiexec.exe -Wait -ArgumentList "/i", "$env:TEMP\winfsp.msi", "/qn", "ADDLOCAL=ALL"
 
       - name: Unit Tests
         env:
