@@ -8,3 +8,5 @@ tiramisu.exe
 *.exe
 *.dll
 *.pdb
+
+test-data/
