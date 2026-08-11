@@ -158,14 +158,14 @@ func (fs *TiramisuFS) Open(path string, flags int) (int, uint64) {
 	hash := stub.ExtractHash(meta.Magnet)
 
 	h := streaming.NewHandle(streaming.HandleConfig{
-		Path:   fullPath,
-		URL:    meta.URL,
-		Magnet: meta.Magnet,
-		Size:   meta.Size,
-		Hash:   hash,
-		FileID: 1, // GoStorm FileStats IDs start at 1 (0 is undefined)
-		Client: fs.client,
-		Cache:  fs.raCache,
+		Path:     fullPath,
+		URL:      meta.URL,
+		Magnet:   meta.Magnet,
+		Size:     meta.Size,
+		Hash:     hash,
+		FilePath: meta.FilePath,
+		Client:   fs.client,
+		Cache:    fs.raCache,
 	})
 
 	fs.handles.Store(path, h)

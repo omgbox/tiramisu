@@ -404,6 +404,24 @@ func (c *NativeClient) RemoveTorrent(hash string) error {
 	return nil
 }
 
+// FindFileID finds the GoStorm file ID (1-based) for a given file path within a torrent.
+func (c *NativeClient) FindFileID(hash string, filePath string) (int, error) {
+	t := torr.GetTorrent(hash)
+	if t == nil || t.Torrent == nil {
+		return 0, fmt.Errorf("torrent not found")
+	}
+	if !t.GotInfo() {
+		return 0, fmt.Errorf("torrent metadata not ready")
+	}
+	st := t.Status()
+	for _, fs := range st.FileStats {
+		if fs != nil && fs.Path == filePath {
+			return fs.Id, nil
+		}
+	}
+	return 0, fmt.Errorf("file %q not found in torrent", filePath)
+}
+
 // PipeResponseWriter bridges GoStorm's HTTP responses to our Go pipe.
 type PipeResponseWriter struct {
 	writer *io.PipeWriter

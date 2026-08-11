@@ -35,12 +35,12 @@ type MkvHandle struct {
 type HandleConfig struct {
 	Path   string
 	URL    string
-	Magnet string
-	Size   int64
-	Hash   string
-	FileID int
-	Client NativeClient
-	Cache  *ReadAheadCache
+	Magnet   string
+	Size     int64
+	Hash     string
+	FilePath string // torrent-internal file path for resolving file ID
+	Client   NativeClient
+	Cache    *ReadAheadCache
 }
 
 // NewHandle creates a new MkvHandle and initializes the persistent NativeReader.
@@ -51,7 +51,6 @@ func NewHandle(cfg HandleConfig) *MkvHandle {
 		magnet:           cfg.Magnet,
 		size:             cfg.Size,
 		hash:             cfg.Hash,
-		fileID:           cfg.FileID,
 		client:           cfg.Client,
 		raCache:          cfg.Cache,
 		lastActivityTime: time.Now(),
@@ -61,12 +60,23 @@ func NewHandle(cfg HandleConfig) *MkvHandle {
 
 	// Wake torrent engine
 	if cfg.Client != nil && cfg.Magnet != "" {
-		if err := cfg.Client.Wake(cfg.Magnet, cfg.FileID); err != nil {
+		if err := cfg.Client.Wake(cfg.Magnet, 0); err != nil {
 			log.Printf("[Handle] Wake failed for %s: %v", cfg.Path, err)
 		} else {
+			// Resolve file ID from torrent metadata
+			if cfg.FilePath != "" {
+				if fid, err := cfg.Client.FindFileID(cfg.Hash, cfg.FilePath); err == nil {
+					h.fileID = fid
+				} else {
+					log.Printf("[Handle] FindFileID failed for %s: %v (using fallback 1)", cfg.Path, err)
+					h.fileID = 1
+				}
+			} else {
+				h.fileID = 1
+			}
 			// Create persistent reader after Wake succeeds
-			h.reader = cfg.Client.NewStreamReader(cfg.Hash, cfg.FileID, cfg.Size)
-			log.Printf("[Handle] Reader created for %s (size=%d)", cfg.Path, cfg.Size)
+			h.reader = cfg.Client.NewStreamReader(cfg.Hash, h.fileID, cfg.Size)
+			log.Printf("[Handle] Reader created for %s (fileID=%d, size=%d)", cfg.Path, h.fileID, cfg.Size)
 		}
 	}
 

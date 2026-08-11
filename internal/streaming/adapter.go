@@ -35,6 +35,11 @@ func (a *GostormAdapter) RemoveTorrent(hash string) error {
 	return a.inner.RemoveTorrent(hash)
 }
 
+// FindFileID finds the GoStorm file ID for a given file path within a torrent.
+func (a *GostormAdapter) FindFileID(hash string, filePath string) (int, error) {
+	return a.inner.FindFileID(hash, filePath)
+}
+
 // GostormReaderAdapter wraps gostorm's NativeReader to implement streaming.NativeReader.
 type GostormReaderAdapter struct {
 	inner *native.NativeReader

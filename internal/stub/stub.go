@@ -12,9 +12,10 @@ import (
 
 // StubMeta represents the metadata stored in a .mkv stub file.
 type StubMeta struct {
-	URL    string `json:"url"`
-	Size   int64  `json:"size"`
-	Magnet string `json:"magnet"`
+	URL      string `json:"url"`
+	Size     int64  `json:"size"`
+	Magnet   string `json:"magnet"`
+	FilePath string `json:"file_path,omitempty"` // path within the torrent (e.g. "video/Sintel.mkv")
 }
 
 // Video extensions that get stubs.
@@ -70,9 +71,10 @@ func CreateStubsFromTorrent(dataDir, torrentPath string) ([]string, error) {
 		}
 
 		meta := StubMeta{
-			URL:    "",
-			Size:   f.Length,
-			Magnet: magnet,
+			URL:      "",
+			Size:     f.Length,
+			Magnet:   magnet,
+			FilePath: fullPath,
 		}
 
 		data, err := json.MarshalIndent(meta, "", "  ")

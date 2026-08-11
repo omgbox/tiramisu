@@ -23,6 +23,7 @@ type NativeClient interface {
 	NewStreamReader(hash string, fileID int, totalSize int64) NativeReader
 	FetchBlock(hash string, fileID int, offset int64, buf []byte) (int, error)
 	RemoveTorrent(hash string) error
+	FindFileID(hash string, filePath string) (int, error)
 }
 
 // MasterSemaphore controls concurrency for data operations.
