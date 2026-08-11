@@ -1,17 +1,15 @@
 package fusefs
 
 import (
-	"encoding/json"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
+	"sync/atomic"
 
 	"tiramisu/internal/streaming"
 	"tiramisu/internal/stub"
-	"tiramisu/internal/warmup"
 
 	"github.com/winfsp/cgofuse/fuse"
 )
@@ -19,12 +17,12 @@ import (
 // TiramisuFS implements fuse.FileSystemInterface for torrent streaming.
 type TiramisuFS struct {
 	fuse.FileSystemBase
-	dataDir     string
-	raCache     *streaming.ReadAheadCache
-	client      streaming.NativeClient
-	handles     sync.Map // path -> *streaming.MkvHandle
-	metaCache   sync.Map // path -> *stub.StubMeta
-	host        *fuse.FileSystemHost
+	dataDir   string
+	raCache   *streaming.ReadAheadCache
+	client    streaming.NativeClient
+	handles   sync.Map // path -> *streaming.MkvHandle
+	metaCache sync.Map // path -> *stub.StubMeta
+	host      *fuse.FileSystemHost
 }
 
 // NewTiramisuFS creates a new FUSE filesystem.
@@ -36,7 +34,7 @@ func NewTiramisuFS(dataDir string, client streaming.NativeClient, raCache *strea
 	}
 }
 
-// Mount starts the FUSE mount at the given point.
+// Mount starts the FUSE mount at the given point (blocks).
 func (fs *TiramisuFS) Mount(mountPoint string) {
 	fs.host = fuse.NewFileSystemHost(fs)
 	log.Printf("[FUSE] Mounting at %s", mountPoint)
@@ -50,25 +48,14 @@ func (fs *TiramisuFS) Unmount() {
 	}
 }
 
-// Wait blocks until the FUSE filesystem is unmounted.
-func (fs *TiramisuFS) Wait() {
-	if fs.host != nil {
-		fs.host.Wait()
-	}
-}
-
 func (fs *TiramisuFS) getOrReadMeta(path string) (*stub.StubMeta, error) {
-	// Check cache
 	if val, ok := fs.metaCache.Load(path); ok {
 		return val.(*stub.StubMeta), nil
 	}
-
-	// Read from disk
 	meta, err := stub.ParseStub(path)
 	if err != nil {
 		return nil, err
 	}
-
 	fs.metaCache.Store(path, meta)
 	return meta, nil
 }
@@ -85,30 +72,22 @@ func (fs *TiramisuFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 	fullPath := fs.resolvePath(path)
 
 	if path == "/" || path == "" {
-		// Root directory
 		stat.Mode = fuse.S_IFDIR | 0755
 		stat.Nlink = 1
-		stat.Blksize = 1048576
 		return 0
 	}
 
-	// Try as .mkv stub
 	if strings.HasSuffix(path, ".mkv") {
 		meta, err := fs.getOrReadMeta(fullPath)
 		if err == nil {
 			stat.Size = meta.Size
 			stat.Mode = fuse.S_IFREG | 0644
 			stat.Nlink = 1
-			stat.Blksize = 1048576
 			stat.Blocks = (meta.Size + 511) / 512
-			stat.Mtim = fuse.NewTimespec(time.Now())
-			stat.Atim = fuse.NewTimespec(time.Now())
-			stat.Ctim = fuse.NewTimespec(time.Now())
 			return 0
 		}
 	}
 
-	// Try as real file/directory
 	fi, err := os.Lstat(fullPath)
 	if err != nil {
 		return -fuse.ENOENT
@@ -123,16 +102,11 @@ func (fs *TiramisuFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 		stat.Nlink = 1
 		stat.Blocks = (fi.Size() + 511) / 512
 	}
-
-	stat.Blksize = 1048576
-	stat.Mtim = fuse.NewTimespec(fi.ModTime())
-	stat.Atim = fuse.NewTimespec(fi.ModTime())
-	stat.Ctim = fuse.NewTimespec(fi.ModTime())
 	return 0
 }
 
-// Readdir lists directory contents.
-func (fs *TiramisuFS) Readdir(path string, fills []fuse.DirEntry, off int64, fh uint64) int {
+// Readdir lists directory contents using the cgofuse fill callback.
+func (fs *TiramisuFS) Readdir(path string, fill func(name string, stat *fuse.Stat_t, off int64) bool, off int64, fh uint64) int {
 	fullPath := fs.resolvePath(path)
 
 	entries, err := os.ReadDir(fullPath)
@@ -140,85 +114,53 @@ func (fs *TiramisuFS) Readdir(path string, fills []fuse.DirEntry, off int64, fh 
 		return -fuse.ENOENT
 	}
 
-	idx := 0
+	idx := int64(0)
 	for _, e := range entries {
 		name := e.Name()
-
-		// For .mkv stubs, show the stub filename
-		// For directories, show them
 		if e.IsDir() || strings.HasSuffix(name, ".mkv") || strings.HasSuffix(name, ".torrent") {
-			if idx >= int(off) {
-				fills = append(fills, fuse.DirEntry{
-					Name: name,
-				})
+			if idx >= off {
+				if !fill(name, nil, idx) {
+					break
+				}
 			}
 			idx++
 		}
 	}
-
-	// Also show .mkv files from stubs in subdirectories
-	if path == "/" || path == "" {
-		subDirs, _ := os.ReadDir(fullPath)
-		for _, d := range subDirs {
-			if d.IsDir() {
-				subPath := filepath.Join(fullPath, d.Name())
-				subEntries, _ := os.ReadDir(subPath)
-				for _, se := range subEntries {
-					if strings.HasSuffix(se.Name(), ".mkv") {
-						name := d.Name() + "/" + se.Name()
-						if idx >= int(off) {
-							fills = append(fills, fuse.DirEntry{
-								Name: name,
-							})
-						}
-						idx++
-					}
-				}
-			}
-		}
-	}
-
 	return 0
 }
 
 // Open opens a file for reading.
-func (fs *TiramisuFS) Open(path string, flags uint64, fh uint64) (int, uint64) {
-	fullPath := fs.resolvePath(path)
-
-	// Root always opens
+func (fs *TiramisuFS) Open(path string, flags int) (int, uint64) {
 	if path == "/" || path == "" {
 		return 0, 0
 	}
 
-	meta, err := fs.getOrReadMeta(fullPath)
-	if err != nil {
+	fullPath := fs.resolvePath(path)
+
+	if _, err := fs.getOrReadMeta(fullPath); err != nil {
 		return -fuse.ENOENT, 0
 	}
 
-	// Check if handle already exists
-	if val, ok := fs.handles.Load(path); ok {
-		h := val.(*streaming.MkvHandle)
-		return 0, uint64(uintptr(h))
+	if _, ok := fs.handles.Load(path); ok {
+		return 0, 1
 	}
 
-	// Extract hash from magnet
+	meta, _ := fs.getOrReadMeta(fullPath)
 	hash := stub.ExtractHash(meta.Magnet)
-	fileIdx := 0
 
-	// Create handle
 	h := streaming.NewHandle(streaming.HandleConfig{
 		Path:   fullPath,
 		URL:    meta.URL,
 		Magnet: meta.Magnet,
 		Size:   meta.Size,
 		Hash:   hash,
-		FileID: fileIdx,
+		FileID: 0,
 		Client: fs.client,
 		Cache:  fs.raCache,
 	})
 
 	fs.handles.Store(path, h)
-	return 0, 0
+	return 0, 1
 }
 
 // Read reads data from a file.
@@ -231,7 +173,6 @@ func (fs *TiramisuFS) Read(path string, buf []byte, off int64, fh uint64) int {
 	h := val.(*streaming.MkvHandle)
 	n, err := h.Read(buf, off)
 	if err != nil {
-		log.Printf("[FUSE] Read error for %s: %v", path, err)
 		return -fuse.EIO
 	}
 	return n
@@ -249,14 +190,12 @@ func (fs *TiramisuFS) Release(path string, fh uint64) int {
 // Statfs returns filesystem statistics.
 func (fs *TiramisuFS) Statfs(path string, statvfs *fuse.Statfs_t) int {
 	statvfs.Bsize = 4096
-	statvfs.Blocks = 250 * 1024 * 1024 // 1TB
+	statvfs.Blocks = 250 * 1024 * 1024
 	statvfs.Bfree = 125 * 1024 * 1024
 	statvfs.Bavail = 125 * 1024 * 1024
-	statvfs.NameLen = 255
 	return 0
 }
 
-// Init is called when the FUSE filesystem is mounted.
-func (fs *TiramisuFS) Init() {
-	log.Printf("[FUSE] Filesystem initialized, dataDir=%s", fs.dataDir)
+func init() {
+	_ = atomic.LoadInt64 // ensure import
 }
