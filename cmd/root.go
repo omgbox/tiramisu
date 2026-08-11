@@ -88,6 +88,11 @@ func Execute() {
 		log.Fatalf("Failed to create gostorm dir: %v", err)
 	}
 	settings.Path = settingsPath
+	settings.Args = &settings.ExecArgs{
+		Port: "0",
+		IP:   "127.0.0.1",
+		Path: settingsPath,
+	}
 	log.Printf("[GoStorm] Initializing at %s", settingsPath)
 	settings.InitSets(false, false)
 
