@@ -1,0 +1,65 @@
+name: Build
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Install WinFsp SDK
+        shell: pwsh
+        run: |
+          $version = "2.1"
+          $build = "25054"
+          $url = "https://github.com/winfsp/winfsp/releases/download/v${version}/winfsp-${version}.${build}.msi"
+          Write-Host "Downloading WinFsp SDK from $url"
+          Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\winfsp.msi"
+          Write-Host "Installing WinFsp SDK..."
+          Start-Process msiexec.exe -Wait -ArgumentList "/i", "$env:TEMP\winfsp.msi", "/qn", "/l*v", "$env:TEMP\winfsp.log"
+          if (Test-Path "C:\Program Files (x86)\WinFsp\inc\fuse\fuse.h") {
+            Write-Host "WinFsp SDK installed successfully"
+          } else {
+            Write-Error "WinFsp headers not found at C:\Program Files (x86)\WinFsp\inc\fuse\fuse.h"
+            Get-Content "$env:TEMP\winfsp.log" | Select-Object -Last 50
+            exit 1
+          }
+
+      - name: Build
+        env:
+          CGO_ENABLED: 1
+          GOOS: windows
+          GOARCH: amd64
+          CPATH: "C:\\Program Files (x86)\\WinFsp\\inc\\fuse"
+        run: |
+          go build -o tiramisu.exe -ldflags="-s -w" .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "Build successful"
+          .\tiramisu.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tiramisu-windows-amd64
+          path: tiramisu.exe
+          retention-days: 30
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: tiramisu.exe
+          generate_release_notes: true

@@ -1,0 +1,706 @@
+package vfs
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/cespare/xxhash/v2"
+	"tiramisu/internal/metadb"
+)
+
+// V133: Deterministic Inode Mapping for Plex/SMB Stability
+// V298: Sharded architecture to eliminate global lock contention.
+// Generates stable inodes based on torrent content identity (infohash+index)
+// instead of filename, ensuring Plex doesn't see "new files" after restarts.
+
+const (
+	// Namespace bits to avoid collisions between files and directories
+	InodeFileMask = 0x7FFFFFFFFFFFFFFF // bit 63 = 0 for files
+	InodeDirMask  = 0x8000000000000000 // bit 63 = 1 for directories
+
+	// Special inodes
+	InodeRoot = 1
+
+	// Save interval
+	InodeSaveInterval = 60 * time.Second
+
+	// Default save path (unified with main.go)
+	DefaultInodeMapPath = "/home/pi/STATE/inode_map.json"
+)
+
+// InodeMap manages persistent content -> inode mapping
+type InodeMap struct {
+	shards    [32]*inodeShard
+	shardMask uint64
+
+	// Persistence
+	savePath string
+	dirty    int32 // V298: Atomic dirty flag
+	stopChan chan struct{}
+	stopOnce sync.Once
+	saveMu   sync.Mutex // Serialize SaveToDisk
+	db       *metadb.DB // V1.7.1: Optional SQLite backend
+
+	// Statistics
+	hits   int64
+	misses int64
+
+	logger Logger
+}
+
+type inodeShard struct {
+	mu sync.RWMutex
+	// Core mappings per shard
+	fileMap     map[string]uint64 // "infohash:index" -> inode
+	dirMap      map[string]uint64 // "/relative/path" -> inode
+	nameMap     map[string]string // "/full/path/filename.mkv" -> "infohash:index"
+	fastFileMap map[string]uint64 // "filename.mkv" -> inode
+}
+
+// InodeMapData is the JSON-serializable format (Merged from all shards)
+type InodeMapData struct {
+	Version       int               `json:"version"`
+	Files         map[string]string `json:"files"`
+	Dirs          map[string]string `json:"dirs"`
+	FilenameIndex map[string]string `json:"filename_index"`
+	LastUpdated   string            `json:"last_updated"`
+}
+
+// InodeMapDataV1 for backward compatibility
+type InodeMapDataV1 struct {
+	Version       int               `json:"version"`
+	Files         map[string]uint64 `json:"files"`
+	Dirs          map[string]uint64 `json:"dirs"`
+	FilenameIndex map[string]string `json:"filename_index"`
+	LastUpdated   string            `json:"last_updated"`
+}
+
+// Logger interface for compatibility
+type Logger interface {
+	Printf(format string, v ...interface{})
+}
+
+// NewInodeMap creates a new sharded inode map
+func NewInodeMap(savePath string, logger Logger) *InodeMap {
+	im := &InodeMap{
+		shardMask: 31,
+		savePath:  savePath,
+		stopChan:  make(chan struct{}),
+		logger:    &loggerWrapper{logger},
+	}
+
+	for i := range im.shards {
+		im.shards[i] = &inodeShard{
+			fileMap:     make(map[string]uint64),
+			dirMap:      make(map[string]uint64),
+			nameMap:     make(map[string]string),
+			fastFileMap: make(map[string]uint64),
+		}
+	}
+
+	// Pre-populate root inode in shard 0
+	im.shards[0].dirMap["/"] = InodeRoot
+
+	return im
+}
+
+// SetDB enables SQLite persistence for the inode map.
+func (im *InodeMap) SetDB(db *metadb.DB) {
+	im.db = db
+}
+
+func (im *InodeMap) getShard(key string) *inodeShard {
+	return im.shards[xxhash.Sum64String(key)&im.shardMask]
+}
+
+func (im *InodeMap) setDirty(isDirty bool) {
+	if isDirty {
+		atomic.StoreInt32(&im.dirty, 1)
+	} else {
+		atomic.StoreInt32(&im.dirty, 0)
+	}
+}
+
+// IsDirty returns whether the map has unsaved changes
+func (im *InodeMap) IsDirty() bool {
+	return atomic.LoadInt32(&im.dirty) == 1
+}
+
+// loggerWrapper wraps the external logger
+type loggerWrapper struct {
+	l Logger
+}
+
+func (w *loggerWrapper) Printf(format string, v ...interface{}) {
+	if w.l != nil {
+		w.l.Printf(format, v...)
+	}
+}
+
+// LoadFromDisk loads the inode map and distributes entries across shards.
+// If SQLite is available (im.db != nil), loads from DB instead of JSON.
+func (im *InodeMap) LoadFromDisk() error {
+	if im.db != nil {
+		return im.loadFromDB()
+	}
+	return im.loadFromJSON()
+}
+
+// loadFromDB populates in-memory maps from SQLite.
+func (im *InodeMap) loadFromDB() error {
+	entries, err := im.db.LoadAll()
+	if err != nil {
+		return fmt.Errorf("inodemap: load from DB: %w", err)
+	}
+
+	var totalFiles, totalDirs int
+	for _, e := range entries {
+		if e.Type == "file" {
+			key := fmt.Sprintf("%s:%d", e.Infohash, e.FileIdx)
+			sName := im.getShard(e.FullPath)
+			sFile := im.getShard(key)
+			sFast := im.getShard(e.Basename)
+
+			sName.mu.Lock()
+			sName.nameMap[e.FullPath] = key
+			sName.mu.Unlock()
+
+			sFile.mu.Lock()
+			sFile.fileMap[key] = e.InodeValue
+			sFile.mu.Unlock()
+
+			sFast.mu.Lock()
+			sFast.fastFileMap[e.Basename] = e.InodeValue
+			sFast.mu.Unlock()
+
+			totalFiles++
+		} else if e.Type == "dir" {
+			s := im.getShard(e.RelPath)
+			s.mu.Lock()
+			s.dirMap[e.RelPath] = e.InodeValue
+			s.mu.Unlock()
+			totalDirs++
+		}
+	}
+
+	im.logger.Printf("InodeMap: Loaded %d files, %d dirs from StateDB", totalFiles, totalDirs)
+	return nil
+}
+
+// loadFromJSON loads from the legacy JSON file (fallback when StateDB is disabled).
+func (im *InodeMap) loadFromJSON() error {
+	data, err := os.ReadFile(im.savePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			im.logger.Printf("InodeMap: No existing map at %s, starting fresh", im.savePath)
+			return nil
+		}
+		return fmt.Errorf("read inode map: %w", err)
+	}
+
+	// Internal helper to add entries correctly during load
+	addLoadedFile := func(fullPath, key string, inode uint64) {
+		sName := im.getShard(fullPath)
+		sFile := im.getShard(key)
+		sFast := im.getShard(filepath.Base(fullPath))
+
+		sName.mu.Lock()
+		sName.nameMap[fullPath] = key
+		sName.mu.Unlock()
+
+		sFile.mu.Lock()
+		sFile.fileMap[key] = inode
+		sFile.mu.Unlock()
+
+		sFast.mu.Lock()
+		sFast.fastFileMap[filepath.Base(fullPath)] = inode
+		sFast.mu.Unlock()
+	}
+
+	addLoadedDir := func(relPath string, inode uint64) {
+		s := im.getShard(relPath)
+		s.mu.Lock()
+		s.dirMap[relPath] = inode
+		s.mu.Unlock()
+	}
+
+	var totalFiles, totalDirs int
+
+	// First try V2 format (string values)
+	var mapDataV2 InodeMapData
+	if err := json.Unmarshal(data, &mapDataV2); err == nil && mapDataV2.Version == 2 {
+		// Temporary reverse mapping to rebuild relationships
+		tempFileMap := make(map[string]uint64)
+		if mapDataV2.Files != nil {
+			for k, v := range mapDataV2.Files {
+				if inode, err := strconv.ParseUint(v, 10, 64); err == nil {
+					tempFileMap[k] = inode
+				}
+			}
+		}
+
+		if mapDataV2.FilenameIndex != nil {
+			for path, key := range mapDataV2.FilenameIndex {
+				if inode, ok := tempFileMap[key]; ok {
+					addLoadedFile(path, key, inode)
+					totalFiles++
+				}
+			}
+		}
+
+		if mapDataV2.Dirs != nil {
+			for k, v := range mapDataV2.Dirs {
+				if inode, err := strconv.ParseUint(v, 10, 64); err == nil {
+					addLoadedDir(k, inode)
+					totalDirs++
+				}
+			}
+		}
+
+		im.logger.Printf("InodeMap: Loaded V2 format - %d files, %d dirs from %s",
+			totalFiles, totalDirs, im.savePath)
+		return nil
+	}
+
+	// Fallback to V1 format (uint64 struct)
+	var mapDataV1 InodeMapDataV1
+	if err := json.Unmarshal(data, &mapDataV1); err != nil {
+		return fmt.Errorf("unmarshal inode map (tried V2 and V1): %w", err)
+	}
+
+	if mapDataV1.Version == 1 {
+		if mapDataV1.FilenameIndex != nil {
+			for path, key := range mapDataV1.FilenameIndex {
+				if inode, ok := mapDataV1.Files[key]; ok {
+					addLoadedFile(path, key, inode)
+					totalFiles++
+				}
+			}
+		}
+		if mapDataV1.Dirs != nil {
+			for k, v := range mapDataV1.Dirs {
+				addLoadedDir(k, v)
+				totalDirs++
+			}
+		}
+		im.logger.Printf("InodeMap: Loaded V1 format - %d files, %d dirs from %s (will save as V2)",
+			totalFiles, totalDirs, im.savePath)
+		im.setDirty(true)
+	}
+
+	return nil
+}
+
+// SaveToDisk persists the inode map.
+// If SQLite is available, writes to DB; otherwise falls back to JSON.
+func (im *InodeMap) SaveToDisk() error {
+	im.saveMu.Lock()
+	defer im.saveMu.Unlock()
+
+	if im.db != nil {
+		return im.saveToDB()
+	}
+	return im.saveToJSON()
+}
+
+// saveToDB writes all shard entries to SQLite in a single transaction.
+func (im *InodeMap) saveToDB() error {
+	// Build full paths from nameMap: fullPath -> "infohash:fileIdx"
+	nameMap := make(map[string]string)
+	for _, s := range im.shards {
+		s.mu.RLock()
+		for k, v := range s.nameMap {
+			nameMap[k] = v
+		}
+		s.mu.RUnlock()
+	}
+
+	// Build reverse map: "infohash:fileIdx" -> fullPath
+	keyToPath := make(map[string]string)
+	for fullPath, key := range nameMap {
+		keyToPath[key] = fullPath
+	}
+
+	tx, err := im.db.SQL().Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Clear existing inodes before rewrite
+	if _, err := tx.Exec("DELETE FROM inodes"); err != nil {
+		return err
+	}
+
+	stmtFile, err := tx.Prepare(
+		"INSERT OR REPLACE INTO inodes (type, infohash, file_idx, full_path, basename, inode_value) VALUES (?, ?, ?, ?, ?, ?)")
+	if err != nil {
+		return err
+	}
+	defer stmtFile.Close()
+
+	stmtDir, err := tx.Prepare(
+		"INSERT OR REPLACE INTO inodes (type, full_path, rel_path, basename, inode_value) VALUES (?, ?, ?, ?, ?)")
+	if err != nil {
+		return err
+	}
+	defer stmtDir.Close()
+
+	fileCount := 0
+	dirCount := 0
+
+	for _, s := range im.shards {
+		s.mu.RLock()
+		for key, inode := range s.fileMap {
+			fullPath := keyToPath[key]
+			parts := strings.SplitN(key, ":", 2)
+			infohash := key
+			fileIdx := 0
+			if len(parts) == 2 {
+				infohash = parts[0]
+				if idx, err := strconv.Atoi(parts[1]); err == nil {
+					fileIdx = idx
+				}
+			}
+			if _, err := stmtFile.Exec("file", infohash, fileIdx, fullPath, pathBase(fullPath), int64(inode)); err != nil {
+				s.mu.RUnlock()
+				return fmt.Errorf("inodemap: save file %s: %w", fullPath, err)
+			}
+			fileCount++
+		}
+		for relPath, inode := range s.dirMap {
+			if _, err := stmtDir.Exec("dir", relPath, relPath, pathBase(relPath), int64(inode)); err != nil {
+				s.mu.RUnlock()
+				return fmt.Errorf("inodemap: save dir %s: %w", relPath, err)
+			}
+			dirCount++
+		}
+		s.mu.RUnlock()
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	im.setDirty(false)
+	im.logger.Printf("InodeMap: Saved %d files, %d dirs to StateDB", fileCount, dirCount)
+	return nil
+}
+
+// saveToJSON persists to the legacy JSON file (fallback when StateDB is disabled).
+func (im *InodeMap) saveToJSON() error {
+	mergedFiles := make(map[string]string)
+	mergedDirs := make(map[string]string)
+	mergedNames := make(map[string]string)
+
+	for _, s := range im.shards {
+		s.mu.RLock()
+		for k, v := range s.fileMap {
+			mergedFiles[k] = strconv.FormatUint(v, 10)
+		}
+		for k, v := range s.dirMap {
+			mergedDirs[k] = strconv.FormatUint(v, 10)
+		}
+		for k, v := range s.nameMap {
+			mergedNames[k] = v
+		}
+		s.mu.RUnlock()
+	}
+
+	mapData := InodeMapData{
+		Version:       2,
+		Files:         mergedFiles,
+		Dirs:          mergedDirs,
+		FilenameIndex: mergedNames,
+		LastUpdated:   time.Now().UTC().Format(time.RFC3339),
+	}
+
+	data, err := json.MarshalIndent(mapData, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal inode map: %w", err)
+	}
+
+	dir := filepath.Dir(im.savePath)
+	tmpFile, err := os.CreateTemp(dir, "inode_map-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+
+	if _, err := tmpFile.Write(data); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	tmpFile.Close()
+
+	if err := os.Rename(tmpPath, im.savePath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename temp file: %w", err)
+	}
+
+	im.setDirty(false)
+	im.logger.Printf("InodeMap: Saved %d files, %d dirs to %s", len(mergedFiles), len(mergedDirs), im.savePath)
+	return nil
+}
+
+func (im *InodeMap) StartBackgroundSaver() {
+	go func() {
+		ticker := time.NewTicker(InodeSaveInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if im.IsDirty() {
+					im.SaveToDisk()
+				}
+			case <-im.stopChan:
+				if im.IsDirty() {
+					im.SaveToDisk()
+				}
+				return
+			}
+		}
+	}()
+}
+
+func (im *InodeMap) Stop() {
+	im.stopOnce.Do(func() {
+		close(im.stopChan)
+		if im.IsDirty() {
+			im.SaveToDisk()
+		}
+	})
+}
+
+func (im *InodeMap) AddFile(fullPath, infohash string, index int) uint64 {
+	if infohash == "" {
+		return 0
+	}
+
+	key := fmt.Sprintf("%s:%d", strings.ToLower(infohash), index)
+	inode := GenerateFileInode(infohash, index)
+
+	sName := im.getShard(fullPath)
+	sFile := im.getShard(key)
+	sFast := im.getShard(filepath.Base(fullPath))
+
+	sName.mu.Lock()
+	if existingKey, ok := sName.nameMap[fullPath]; ok && existingKey == key {
+		sName.mu.Unlock()
+		return inode
+	}
+	sName.nameMap[fullPath] = key
+	sName.mu.Unlock()
+
+	sFile.mu.Lock()
+	sFile.fileMap[key] = inode
+	sFile.mu.Unlock()
+
+	sFast.mu.Lock()
+	sFast.fastFileMap[filepath.Base(fullPath)] = inode
+	sFast.mu.Unlock()
+
+	im.setDirty(true)
+	return inode
+}
+
+func (im *InodeMap) AddDir(relativePath string) uint64 {
+	inode := GenerateDirInode(relativePath)
+	s := im.getShard(relativePath)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.dirMap[relativePath]; !ok {
+		s.dirMap[relativePath] = inode
+		im.setDirty(true)
+	}
+	return inode
+}
+
+func (im *InodeMap) GetFileInode(fullPath string) uint64 {
+	sName := im.getShard(fullPath)
+	sName.mu.RLock()
+	key, ok := sName.nameMap[fullPath]
+	sName.mu.RUnlock()
+
+	if ok {
+		sFile := im.getShard(key)
+		sFile.mu.RLock()
+		inode, ok2 := sFile.fileMap[key]
+		sFile.mu.RUnlock()
+		if ok2 {
+			atomic.AddInt64(&im.hits, 1)
+			return inode
+		}
+	}
+
+	atomic.AddInt64(&im.misses, 1)
+	return 0
+}
+
+func (im *InodeMap) GetFileInodeByName(filename string) uint64 {
+	s := im.getShard(filename)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if inode, ok := s.fastFileMap[filename]; ok {
+		atomic.AddInt64(&im.hits, 1)
+		return inode
+	}
+	atomic.AddInt64(&im.misses, 1)
+	return 0
+}
+
+func (im *InodeMap) GetDirInode(relativePath string) uint64 {
+	if relativePath == "/" || relativePath == "" {
+		return InodeRoot
+	}
+
+	s := im.getShard(relativePath)
+	s.mu.RLock()
+	inode, ok := s.dirMap[relativePath]
+	s.mu.RUnlock()
+
+	if ok {
+		return inode
+	}
+	return im.AddDir(relativePath)
+}
+
+func (im *InodeMap) RemoveFile(fullPath string) {
+	sName := im.getShard(fullPath)
+	sName.mu.Lock()
+	key, ok := sName.nameMap[fullPath]
+	if ok {
+		delete(sName.nameMap, fullPath)
+		sName.mu.Unlock()
+
+		sFile := im.getShard(key)
+		sFile.mu.Lock()
+		targetInode := sFile.fileMap[key]
+		delete(sFile.fileMap, key)
+		sFile.mu.Unlock()
+
+		filename := filepath.Base(fullPath)
+		sFast := im.getShard(filename)
+		sFast.mu.Lock()
+		if currentInode, exists := sFast.fastFileMap[filename]; exists && currentInode == targetInode {
+			delete(sFast.fastFileMap, filename)
+		}
+		sFast.mu.Unlock()
+
+		im.setDirty(true)
+	} else {
+		sName.mu.Unlock()
+	}
+}
+
+func (im *InodeMap) Stats() (files, dirs, hits, misses int64) {
+	for _, s := range im.shards {
+		s.mu.RLock()
+		files += int64(len(s.fileMap))
+		dirs += int64(len(s.dirMap))
+		s.mu.RUnlock()
+	}
+	hits = atomic.LoadInt64(&im.hits)
+	misses = atomic.LoadInt64(&im.misses)
+	return
+}
+
+func (im *InodeMap) PruneMissing(foundFiles map[string]bool) int {
+	var toRemove []string
+
+	// Pass 1: Identify under read locks
+	for _, s := range im.shards {
+		s.mu.RLock()
+		for fullPath := range s.nameMap {
+			if !foundFiles[fullPath] {
+				toRemove = append(toRemove, fullPath)
+			}
+		}
+		s.mu.RUnlock()
+	}
+
+	// Pass 2: Remove from in-memory maps
+	for _, path := range toRemove {
+		im.RemoveFile(path)
+	}
+
+	// Pass 3: Also remove from SQLite if available
+	if im.db != nil && len(toRemove) > 0 {
+		pruned, err := im.db.PruneMissing(foundFiles)
+		if err != nil {
+			im.logger.Printf("InodeMap: Warning - failed to prune from DB: %v", err)
+		} else if pruned > 0 {
+			im.logger.Printf("InodeMap GC: Pruned %d entries from StateDB", pruned)
+		}
+	}
+
+	if len(toRemove) > 0 {
+		im.setDirty(true)
+		im.logger.Printf("InodeMap GC: Pruned %d ghost entries from memory", len(toRemove))
+	}
+	return len(toRemove)
+}
+
+// --- Helper functions for extracting hash and index from URLs ---
+
+func GenerateFileInode(infohash string, index int) uint64 {
+	key := fmt.Sprintf("%s:%d", strings.ToLower(infohash), index)
+	return xxhash.Sum64String(key) & InodeFileMask
+}
+
+func GenerateDirInode(relativePath string) uint64 {
+	if relativePath == "/" || relativePath == "" {
+		return InodeRoot
+	}
+	return xxhash.Sum64String(relativePath) | InodeDirMask
+}
+
+// pathBase returns the base name of a path (equivalent to filepath.Base).
+func pathBase(p string) string {
+	for i := len(p) - 1; i >= 0; i-- {
+		if p[i] == '/' {
+			return p[i+1:]
+		}
+	}
+	return p
+}
+
+var (
+	hashPattern  = regexp.MustCompile(`link=([a-fA-F0-9]{40})`)
+	indexPattern = regexp.MustCompile(`index=(\d+)`)
+)
+
+// ExtractHashAndIndex extracts the torrent hash and file index from a stream URL
+func ExtractHashAndIndex(url string) (string, int) {
+	hash := ""
+	index := 0
+
+	if matches := hashPattern.FindStringSubmatch(url); len(matches) > 1 {
+		hash = strings.ToLower(matches[1])
+	}
+
+	if matches := indexPattern.FindStringSubmatch(url); len(matches) > 1 {
+		if idx, err := strconv.Atoi(matches[1]); err == nil {
+			index = idx
+		}
+	}
+
+	return hash, index
+}
+
+// GetDefaultInodeMapPath returns the default save path for the inode map.
+func GetDefaultInodeMapPath(stateDir string) string {
+	return filepath.Join(stateDir, "inode_map.json")
+}

@@ -1,0 +1,17 @@
+{
+  "master_concurrency_limit": 25,
+  "read_ahead_budget_mb": 256,
+  "fuse_block_size_bytes": 1048576,
+  "streaming_threshold_kb": 128,
+  "log_level": "INFO",
+  "attr_timeout_seconds": 1.0,
+  "entry_timeout_seconds": 1.0,
+  "negative_timeout_seconds": 0.0,
+  "physical_source_path": "data",
+  "fuse_mount_point": "Z:",
+  "data_dir": "data",
+  "metadata_cache_size_mb": 50,
+  "disk_warmup_quota_gb": 15,
+  "gostorm_url": "http://127.0.0.1:8090",
+  "warmup_head_size_mb": 64
+}
