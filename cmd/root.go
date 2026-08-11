@@ -12,8 +12,9 @@ import (
 
 	"tiramisu/internal/config"
 	"tiramisu/internal/fusefs"
-	server "tiramisu/internal/gostorm"
 	"tiramisu/internal/gostorm/native"
+	"tiramisu/internal/gostorm/settings"
+	"tiramisu/internal/gostorm/torr"
 	"tiramisu/internal/streaming"
 	"tiramisu/internal/stub"
 	"tiramisu/internal/warmup"
@@ -81,9 +82,21 @@ func Execute() {
 	warmupDir := filepath.Join(cfg.RootPath, "warmup")
 	warmup.InitDiskWarmup(warmupDir, cfg.DiskWarmupQuotaGB)
 
-	// Start GoStorm torrent engine
-	log.Printf("[GoStorm] Starting torrent engine...")
-	server.Start()
+	// Initialize GoStorm settings (no HTTP server)
+	settingsPath := filepath.Join(cfg.RootPath, "gostorm")
+	if err := os.MkdirAll(settingsPath, 0755); err != nil {
+		log.Fatalf("Failed to create gostorm dir: %v", err)
+	}
+	settings.Path = settingsPath
+	log.Printf("[GoStorm] Initializing at %s", settingsPath)
+	settings.InitSets(false, false)
+
+	// Initialize torrent engine directly (no web server)
+	bts := torr.NewBTS()
+	if err := bts.Connect(); err != nil {
+		log.Fatalf("Failed to connect torrent engine: %v", err)
+	}
+	log.Printf("[GoStorm] Torrent engine connected")
 
 	// Create native client bridge
 	nativeClient := native.NewNativeClient()
@@ -134,7 +147,7 @@ func addTorrent(dataDir, torrentPath string) error {
 func addMagnet(dataDir, magnetURI string) error {
 	stubPath, err := stub.CreateStubFromMagnet(dataDir, magnetURI)
 	if err != nil {
-		return fmt.Errorf("create stub: %w", err)
+		return fmt.Errorf("create stub: %v", err)
 	}
 
 	log.Printf("Created stub: %s", stubPath)
