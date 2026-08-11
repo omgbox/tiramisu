@@ -163,7 +163,7 @@ func (fs *TiramisuFS) Open(path string, flags int) (int, uint64) {
 		Magnet: meta.Magnet,
 		Size:   meta.Size,
 		Hash:   hash,
-		FileID: 0,
+		FileID: 1, // GoStorm FileStats IDs start at 1 (0 is undefined)
 		Client: fs.client,
 		Cache:  fs.raCache,
 	})
