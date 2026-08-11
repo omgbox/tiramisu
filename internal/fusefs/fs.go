@@ -64,10 +64,19 @@ func (fs *TiramisuFS) resolvePath(path string) string {
 	if path == "/" || path == "" {
 		return fs.dataDir
 	}
-	// Strip leading slash for Windows compatibility
 	cleaned := strings.TrimPrefix(path, "/")
 	cleaned = filepath.Clean(cleaned)
 	return filepath.Join(fs.dataDir, cleaned)
+}
+
+// isVideoStub checks if a filename looks like a video stub (.mkv, .mp4, .avi, etc.)
+func isVideoStub(name string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	case ".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm":
+		return true
+	}
+	return false
 }
 
 // Getattr returns file/directory attributes.
@@ -80,7 +89,7 @@ func (fs *TiramisuFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 		return 0
 	}
 
-	if strings.HasSuffix(path, ".mkv") {
+	if isVideoStub(path) {
 		meta, err := fs.getOrReadMeta(fullPath)
 		if err == nil {
 			stat.Size = meta.Size
@@ -120,7 +129,7 @@ func (fs *TiramisuFS) Readdir(path string, fill func(name string, stat *fuse.Sta
 	idx := int64(0)
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || strings.HasSuffix(name, ".mkv") || strings.HasSuffix(name, ".torrent") {
+		if e.IsDir() || isVideoStub(name) || strings.HasSuffix(name, ".torrent") {
 			if idx >= off {
 				stat := &fuse.Stat_t{}
 				if e.IsDir() {
