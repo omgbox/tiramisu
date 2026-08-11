@@ -1,7 +1,11 @@
 package main
 
-import "tiramisu/cmd"
+import (
+	"fmt"
+	"tiramisu/cmd"
+)
 
 func main() {
+	fmt.Println("[main] starting...")
 	cmd.Execute()
 }
