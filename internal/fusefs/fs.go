@@ -64,7 +64,10 @@ func (fs *TiramisuFS) resolvePath(path string) string {
 	if path == "/" || path == "" {
 		return fs.dataDir
 	}
-	return filepath.Join(fs.dataDir, filepath.Clean(path))
+	// Strip leading slash for Windows compatibility
+	cleaned := strings.TrimPrefix(path, "/")
+	cleaned = filepath.Clean(cleaned)
+	return filepath.Join(fs.dataDir, cleaned)
 }
 
 // Getattr returns file/directory attributes.
