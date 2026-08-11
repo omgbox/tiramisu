@@ -51,8 +51,9 @@ jobs:
           GOOS: windows
           GOARCH: amd64
           CPATH: "C:\\Program Files (x86)\\WinFsp\\inc\\fuse"
+          GOFLAGS: "-tags=disable_libutp"
         run: |
-          go build -o tiramisu.exe -ldflags="-s -w" .
+          go build -o tiramisu.exe -ldflags="-s -w" -tags=disable_libutp .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Write-Host "Build successful"
 
