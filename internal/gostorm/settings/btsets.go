@@ -89,7 +89,7 @@ func SetBTSets(sets *BTSets) {
 		sets.ConnectionsLimit = 80
 	}
 	if sets.TorrentDisconnectTimeout <= 0 {
-		sets.TorrentDisconnectTimeout = 300
+		sets.TorrentDisconnectTimeout = 1800 // 30 minutes
 	}
 
 	if sets.ReaderReadAHead < 5 {
@@ -157,7 +157,7 @@ func SetDefaultConfig() {
 	sets.PreloadCache = 0
 	sets.ConnectionsLimit = 80          // increased for multi-torrent concurrency
 	sets.RetrackersMode = 1
-	sets.TorrentDisconnectTimeout = 300
+	sets.TorrentDisconnectTimeout = 1800 // 30 minutes
 	sets.ReaderReadAHead = 75 // 75%
 	sets.EnableIPv6 = true
 	sets.ResponsiveMode = true
@@ -214,7 +214,7 @@ func loadBTSets() {
 	sets.PreloadCache = 0
 	sets.ConnectionsLimit = 80
 	sets.RetrackersMode = 1
-	sets.TorrentDisconnectTimeout = 300
+	sets.TorrentDisconnectTimeout = 1800 // 30 minutes
 	sets.ReaderReadAHead = 75 // 75%
 	sets.EnableIPv6 = true
 	sets.ResponsiveMode = true

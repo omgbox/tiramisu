@@ -91,7 +91,7 @@ func NewTorrent(spec *torrent.TorrentSpec, bt *BTServer) (*Torrent, error) {
 
 	timeout := time.Second * time.Duration(settings.BTsets.TorrentDisconnectTimeout)
 	if timeout <= 0 {
-		timeout = 5 * time.Minute // fallback
+		timeout = 30 * time.Minute // fallback
 	}
 
 	torr := new(Torrent)
@@ -250,12 +250,7 @@ func (t *Torrent) expired() bool {
 	if !t.expiredTime.Before(time.Now()) {
 		return false // Timer not expired yet
 	}
-	// V255: Torrent with no cache (GotInfo failed/never called) should also expire.
-	// Previously cache==nil returned false, causing zombies in RAM forever.
-	if t.cache == nil {
-		return true
-	}
-	return t.cache.Readers() == 0
+	return true
 }
 
 // SetAggressiveMode enables or disables aggressive download priority in the cache
