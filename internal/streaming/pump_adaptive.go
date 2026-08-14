@@ -57,14 +57,15 @@ func putFetchBuf(buf []byte) {
 
 const (
 	appMinChunk    = 128 * 1024        // 128KB minimum
-	appMaxChunk    = 4 * 1024 * 1024   // 4MB maximum (up from 2MB)
-	appLeadWindow  = 8 * 1024 * 1024   // 8MB around player position (up from 4MB)
-	appTrailGap    = 4                  // trail stream starts 4 chunks ahead of lead (up from 2)
+	appMaxChunk    = 2 * 1024 * 1024   // 2MB maximum
+	appLeadWindow  = 8 * 1024 * 1024   // 8MB around player position
+	appTrailGap    = 4                  // trail stream starts 4 chunks ahead of lead
 	appProbeWindow = 5                  // track last N reads for pattern detection
 	appAdaptWindow = 5 * time.Second   // measure throughput over 5s windows
 	appMinBytesPS  = 512 * 1024        // 512 KB/s minimum target
-	appSeekBurst   = 8 * 1024 * 1024   // 8MB prefetch on seek
-	appConcurrent  = 4                 // concurrent fetch goroutines per stream
+	appSeekBurst   = 4 * 1024 * 1024   // 4MB prefetch on seek
+	appConcurrent  = 2                 // concurrent fetch goroutines per stream
+	appMaxCacheMB  = 256               // hard memory ceiling for cache
 )
 
 // pumpPhase represents the pump's current operating mode.
@@ -293,6 +294,12 @@ func (p *AdaptivePump) run() {
 		case <-p.cancel:
 			return
 		default:
+		}
+
+		// Memory ceiling: stop pumping if cache exceeds limit
+		if cacheUsed, _ := p.handle.raCache.Stats(); cacheUsed > appMaxCacheMB*1024*1024 {
+			time.Sleep(200 * time.Millisecond)
+			continue
 		}
 
 		chunkSize := p.chunkSize.Load()

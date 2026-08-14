@@ -90,8 +90,8 @@ func NewTorrent(spec *torrent.TorrentSpec, bt *BTServer) (*Torrent, error) {
 	}
 
 	timeout := time.Second * time.Duration(settings.BTsets.TorrentDisconnectTimeout)
-	if timeout > time.Minute {
-		timeout = time.Minute
+	if timeout <= 0 {
+		timeout = 5 * time.Minute // fallback
 	}
 
 	torr := new(Torrent)
