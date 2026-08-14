@@ -3,10 +3,10 @@ package api
 import (
 	"net/http"
 
-	"tiramisu/internal/gostorm/log"
-	set "tiramisu/internal/gostorm/settings"
-	"tiramisu/internal/gostorm/torr"
-	"tiramisu/internal/gostorm/web/api/utils"
+	"bittorrentfs/internal/gostorm/log"
+	set "bittorrentfs/internal/gostorm/settings"
+	"bittorrentfs/internal/gostorm/torr"
+	"bittorrentfs/internal/gostorm/web/api/utils"
 
 	"github.com/gin-gonic/gin"
 )

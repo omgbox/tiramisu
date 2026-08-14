@@ -85,7 +85,7 @@ type Torrent struct {
 	// releases with nfo/sample files before the main video).
 	warmupFileID atomic.Int64
 
-	// playbackPressureActive is set externally by the GoStream/Tiramisu pump loop when its lead
+	// playbackPressureActive is set externally by the GoStream/BitTorrentFS pump loop when its lead
 	// over the player's read offset has worn thin (see nativePumpChunk's diff/budget check) -
 	// the same "buffer running low" signal already used to throttle the pump, reused here to
 	// extend tail-hedging beyond the initial warmup window into steady-state playback.
@@ -1006,7 +1006,7 @@ func (t *Torrent) warmupPieceRange(maxPieces int) (begin, end pieceIndex, ok boo
 	return begin, end, true
 }
 
-// SetPlaybackPressure is called by the GoStream/Tiramisu pump loop when its lead over the
+// SetPlaybackPressure is called by the GoStream/BitTorrentFS pump loop when its lead over the
 // player's read offset has worn thin (see nativePumpChunk), to extend tail-hedging into
 // steady-state playback instead of only the initial warmup window. offset is the pump's current
 // byte position when active is true; ignored when active is false.
@@ -1123,7 +1123,7 @@ func (t *Torrent) hedgeWatchdog() {
 // hedgeWarmupPieceWindow bounds hedging to the first N pieces of the file being warmed - wider
 // than Task 3's 3-piece connection probe (which only needs a cheap "does this peer look useful"
 // signal), since hedging should cover the actual in-flight warmup fetch range. The fork doesn't
-// have direct access to warmup.FileSize (a Tiramisu-level constant, unreachable across the
+// have direct access to warmup.FileSize (a BitTorrentFS-level constant, unreachable across the
 // module boundary), so this is a generous fixed approximation - 32 pieces safely covers a 64MB
 // warmup window for typical piece sizes (2-8MB) without requiring exact byte-range knowledge.
 const hedgeWarmupPieceWindow = 32

@@ -1,12 +1,28 @@
-tiramisu.exe
-*.test
-*.out
-*.prof
-/vendor/
-.idea/
-.vscode/
+# Binaries
+bittorrentfs.exe
 *.exe
 *.dll
 *.pdb
 
+# Test/profiling
+*.test
+*.out
+*.prof
+
+# IDE
+.idea/
+.vscode/
+
+# Dependencies
+/vendor/
+
+# Data
 test-data/
+
+# Logs
+*.log
+
+# Temp files
+*.000
+*.upx
+*~

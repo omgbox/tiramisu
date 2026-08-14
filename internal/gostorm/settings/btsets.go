@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"tiramisu/internal/gostorm/log"
+	"bittorrentfs/internal/gostorm/log"
 )
 
 type BTSets struct {
@@ -86,10 +86,10 @@ func SetBTSets(sets *BTSets) {
 		sets.CacheSize = 128 * 1024 * 1024
 	}
 	if sets.ConnectionsLimit <= 0 {
-		sets.ConnectionsLimit = 25
+		sets.ConnectionsLimit = 80
 	}
 	if sets.TorrentDisconnectTimeout <= 0 {
-		sets.TorrentDisconnectTimeout = 30
+		sets.TorrentDisconnectTimeout = 300
 	}
 
 	if sets.ReaderReadAHead < 5 {
@@ -155,14 +155,15 @@ func SetDefaultConfig() {
 	sets := new(BTSets)
 	sets.CacheSize = 128 * 1024 * 1024 // 128 MB
 	sets.PreloadCache = 0
-	sets.ConnectionsLimit = 25
+	sets.ConnectionsLimit = 80          // increased for multi-torrent concurrency
 	sets.RetrackersMode = 1
-	sets.TorrentDisconnectTimeout = 15
+	sets.TorrentDisconnectTimeout = 300
 	sets.ReaderReadAHead = 75 // 75%
 	sets.EnableIPv6 = true
 	sets.ResponsiveMode = true
 	sets.AdaptiveShield = true
-	sets.DisableUTP = true
+	sets.DisableUTP = false
+	sets.PeersListenPort = 6881
 	sets.ShowFSActiveTorr = true
 	sets.StoreSettingsInJson = true
 	sets.AggressivePeerManagement = true
@@ -211,14 +212,15 @@ func loadBTSets() {
 	sets := new(BTSets)
 	sets.CacheSize = 128 * 1024 * 1024 // 128 MB
 	sets.PreloadCache = 0
-	sets.ConnectionsLimit = 25
+	sets.ConnectionsLimit = 80
 	sets.RetrackersMode = 1
-	sets.TorrentDisconnectTimeout = 15
+	sets.TorrentDisconnectTimeout = 300
 	sets.ReaderReadAHead = 75 // 75%
 	sets.EnableIPv6 = true
 	sets.ResponsiveMode = true
 	sets.AdaptiveShield = true
-	sets.DisableUTP = true
+	sets.DisableUTP = false
+	sets.PeersListenPort = 6881
 	sets.ShowFSActiveTorr = true
 	sets.StoreSettingsInJson = true
 	sets.AggressivePeerManagement = true

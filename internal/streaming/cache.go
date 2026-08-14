@@ -15,31 +15,40 @@ const (
 	evictionAgeSec   = 120              // evict entries older than 120s
 )
 
+// cacheKey is a composite key avoiding string allocation on the hot path.
+type cacheKey struct {
+	offset int64  // 8 bytes — largest first
+	path   string // 16 bytes (pointer + len)
+}
+
 // ReadAheadCache is a 32-shard concurrent LRU cache for streaming data.
 type ReadAheadCache struct {
 	shards      [numShards]*raShard
-	used        int64 // atomic, total bytes cached
+	budget      int64         // 8 bytes
+	chunkSize   int64         // 8 bytes
+	used        int64         // atomic, 8 bytes
 	pool        chan []byte
-	chunkSize   int64
-	budget      int64
 	muContext   sync.Mutex
-	activePath  string
 	sessionID   int64
+	activePath  string
 	pieceLens   sync.Map // path -> int64 (adaptive chunk size)
 }
 
 type raShard struct {
-	buffers map[string]*raBuffer
-	order   []string
 	mu      sync.RWMutex
+	buffers map[cacheKey]*raBuffer
+	order   []cacheKey
 	total   int64
 }
 
+// raBuffer fields ordered: largest→smallest for alignment.
+// int64 fields first, then pointer, then int64, then int32.
 type raBuffer struct {
-	start, end int64
-	data       []byte
-	lastAccess int64 // atomic, nanosecond timestamp
-	sessionID  int64
+	data       []byte // 24 bytes (pointer + len + cap)
+	start      int64  // 8 bytes
+	end        int64  // 8 bytes
+	lastAccess int64  // 8 bytes — atomic, nanosecond timestamp
+	sessionID  int64  // 8 bytes
 }
 
 // NewReadAheadCache creates a new cache with the given budget in bytes.
@@ -53,7 +62,7 @@ func NewReadAheadCache(budget int64, chunkSize int64) *ReadAheadCache {
 	}
 	for i := 0; i < numShards; i++ {
 		c.shards[i] = &raShard{
-			buffers: make(map[string]*raBuffer),
+			buffers: make(map[cacheKey]*raBuffer),
 		}
 	}
 	// Pool of recycled buffers
@@ -73,8 +82,8 @@ func (c *ReadAheadCache) shardFor(path string) *raShard {
 	return c.shards[h&shardMask]
 }
 
-func chunkKey(path string, offset int64) string {
-	return path + ":" + itoa(offset)
+func chunkKey(path string, offset int64) cacheKey {
+	return cacheKey{path: path, offset: offset}
 }
 
 // SetPieceLen stores the adaptive chunk size for a path.
@@ -109,7 +118,7 @@ func (c *ReadAheadCache) Put(path string, offset int64, data []byte) {
 	key := chunkKey(path, offset)
 	shard := c.shardFor(path)
 
-	// Get a buffer (recycle or allocate)
+	// Get a buffer (recycle or allocate) and copy data into it
 	buf := c.getBuffer(len(data))
 	copy(buf, data[:len(data)])
 
@@ -130,6 +139,39 @@ func (c *ReadAheadCache) Put(path string, offset int64, data []byte) {
 	}
 	shard.total += int64(len(data))
 	atomic.AddInt64(&c.used, int64(len(data)))
+	shard.order = append(shard.order, key)
+	shard.mu.Unlock()
+
+	// Evict if over budget
+	if atomic.LoadInt64(&c.used) > c.budget {
+		c.evictShard(shard)
+	}
+}
+
+// PutOwned stores data without copying — caller must not use buf after this call.
+// Zero-copy path for pump fetchChunk buffers.
+func (c *ReadAheadCache) PutOwned(path string, offset int64, buf []byte) {
+	key := chunkKey(path, offset)
+	shard := c.shardFor(path)
+	n := len(buf)
+
+	shard.mu.Lock()
+	// If overwriting, recycle old buffer
+	if old, ok := shard.buffers[key]; ok {
+		c.recycle(old.data)
+		shard.total -= (old.end - old.start)
+		atomic.AddInt64(&c.used, -(old.end - old.start))
+	}
+
+	shard.buffers[key] = &raBuffer{
+		start:      offset,
+		end:        offset + int64(n),
+		data:       buf,
+		lastAccess: time.Now().UnixNano(),
+		sessionID:  c.sessionID,
+	}
+	shard.total += int64(n)
+	atomic.AddInt64(&c.used, int64(n))
 	shard.order = append(shard.order, key)
 	shard.mu.Unlock()
 
@@ -225,7 +267,7 @@ func (c *ReadAheadCache) evictShard(shard *raShard) {
 	now := time.Now().UnixNano()
 	ageLimit := int64(evictionAgeSec) * int64(time.Second)
 
-	var kept []string
+	kept := make([]cacheKey, 0, len(shard.order))
 	for _, key := range shard.order {
 		b, ok := shard.buffers[key]
 		if !ok {
@@ -246,10 +288,16 @@ func (c *ReadAheadCache) evictShard(shard *raShard) {
 }
 
 func (c *ReadAheadCache) getBuffer(size int) []byte {
+	// Try to reuse a pooled buffer (any size >= requested)
 	select {
 	case buf := <-c.pool:
 		if cap(buf) >= size {
 			return buf[:size]
+		}
+		// Too small — put it back and allocate fresh
+		select {
+		case c.pool <- buf[:0]:
+		default:
 		}
 		return make([]byte, size)
 	default:
@@ -258,27 +306,11 @@ func (c *ReadAheadCache) getBuffer(size int) []byte {
 }
 
 func (c *ReadAheadCache) recycle(buf []byte) {
-	if cap(buf) == int(c.chunkSize) {
+	// Recycle any buffer >= 128KB (adaptive chunk sizing produces variable sizes)
+	if cap(buf) >= 128*1024 {
 		select {
 		case c.pool <- buf[:0]:
 		default:
 		}
 	}
-}
-
-// itoa is a fast int64 to string conversion for cache keys.
-func itoa(n int64) string {
-	if n == 0 {
-		return "0"
-	}
-	b := make([]byte, 0, 20)
-	for n > 0 {
-		b = append(b, byte('0'+n%10))
-		n /= 10
-	}
-	// Reverse
-	for i, j := 0, len(b)-1; i < j; i, j = i+1, j-1 {
-		b[i], b[j] = b[j], b[i]
-	}
-	return string(b)
 }

@@ -6,16 +6,16 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
+	"time"
 
-	"tiramisu/internal/streaming"
-	"tiramisu/internal/stub"
+	"bittorrentfs/internal/streaming"
+	"bittorrentfs/internal/stub"
 
 	"github.com/winfsp/cgofuse/fuse"
 )
 
-// TiramisuFS implements fuse.FileSystemInterface for torrent streaming.
-type TiramisuFS struct {
+// BitTorrentFS implements fuse.FileSystemInterface for torrent streaming.
+type BitTorrentFS struct {
 	fuse.FileSystemBase
 	dataDir   string
 	raCache   *streaming.ReadAheadCache
@@ -23,32 +23,84 @@ type TiramisuFS struct {
 	handles   sync.Map // path -> *streaming.MkvHandle
 	metaCache sync.Map // path -> *stub.StubMeta
 	host      *fuse.FileSystemHost
+	pumpSem   *streaming.MasterSemaphore // limits concurrent read-ahead pumps
+
+	// Readdir cache — prevents Explorer from hammering the filesystem
+	dirCacheMu sync.RWMutex
+	dirCache   map[string]dirCacheEntry
+
+	// Handle cleanup
+	handleCleanupStop chan struct{}
 }
 
-// NewTiramisuFS creates a new FUSE filesystem.
-func NewTiramisuFS(dataDir string, client streaming.NativeClient, raCache *streaming.ReadAheadCache) *TiramisuFS {
-	return &TiramisuFS{
-		dataDir: dataDir,
-		raCache: raCache,
-		client:  client,
+type dirCacheEntry struct {
+	entries  []os.DirEntry
+	created  time.Time
+}
+
+// NewBitTorrentFS creates a new FUSE filesystem.
+func NewBitTorrentFS(dataDir string, client streaming.NativeClient, raCache *streaming.ReadAheadCache) *BitTorrentFS {
+	// Scale pump semaphore: 4 base + up to 4 more for concurrent streams
+	pumpSem := streaming.NewMasterSemaphore(8)
+
+	fs := &BitTorrentFS{
+		dataDir:           dataDir,
+		raCache:           raCache,
+		client:            client,
+		pumpSem:           pumpSem,
+		dirCache:          make(map[string]dirCacheEntry),
+		handleCleanupStop: make(chan struct{}),
+	}
+	go fs.handleCleanupLoop()
+	return fs
+}
+
+// handleCleanupLoop periodically closes idle handles to prevent goroutine leaks.
+func (fs *BitTorrentFS) handleCleanupLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-fs.handleCleanupStop:
+			return
+		case <-ticker.C:
+			fs.handles.Range(func(key, val any) bool {
+				h := val.(*streaming.MkvHandle)
+			// Close handles idle for 5min that aren't actively being read
+			if !h.IsActive(5 * time.Minute) {
+					path := key.(string)
+					log.Printf("[FUSE] Closing idle handle: %s", path)
+					h.Close()
+					fs.handles.Delete(key)
+				}
+				return true
+			})
+		}
 	}
 }
 
 // Mount starts the FUSE mount at the given point (blocks).
-func (fs *TiramisuFS) Mount(mountPoint string) {
+func (fs *BitTorrentFS) Mount(mountPoint string) {
 	fs.host = fuse.NewFileSystemHost(fs)
 	log.Printf("[FUSE] Mounting at %s", mountPoint)
 	fs.host.Mount(mountPoint, nil)
 }
 
 // Unmount unmounts the FUSE filesystem.
-func (fs *TiramisuFS) Unmount() {
+func (fs *BitTorrentFS) Unmount() {
+	close(fs.handleCleanupStop)
+	// Close all handles
+	fs.handles.Range(func(key, val any) bool {
+		val.(*streaming.MkvHandle).Close()
+		fs.handles.Delete(key)
+		return true
+	})
 	if fs.host != nil {
 		fs.host.Unmount()
 	}
 }
 
-func (fs *TiramisuFS) getOrReadMeta(path string) (*stub.StubMeta, error) {
+func (fs *BitTorrentFS) getOrReadMeta(path string) (*stub.StubMeta, error) {
 	if val, ok := fs.metaCache.Load(path); ok {
 		return val.(*stub.StubMeta), nil
 	}
@@ -60,7 +112,7 @@ func (fs *TiramisuFS) getOrReadMeta(path string) (*stub.StubMeta, error) {
 	return meta, nil
 }
 
-func (fs *TiramisuFS) resolvePath(path string) string {
+func (fs *BitTorrentFS) resolvePath(path string) string {
 	if path == "/" || path == "" {
 		return fs.dataDir
 	}
@@ -80,7 +132,7 @@ func isVideoStub(name string) bool {
 }
 
 // Getattr returns file/directory attributes.
-func (fs *TiramisuFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
+func (fs *BitTorrentFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 	fullPath := fs.resolvePath(path)
 
 	if path == "/" || path == "" {
@@ -118,37 +170,83 @@ func (fs *TiramisuFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 }
 
 // Readdir lists directory contents using the cgofuse fill callback.
-func (fs *TiramisuFS) Readdir(path string, fill func(name string, stat *fuse.Stat_t, off int64) bool, off int64, fh uint64) int {
+func (fs *BitTorrentFS) Readdir(path string, fill func(name string, stat *fuse.Stat_t, off int64) bool, off int64, fh uint64) int {
 	fullPath := fs.resolvePath(path)
 
-	entries, err := os.ReadDir(fullPath)
-	if err != nil {
-		return -fuse.ENOENT
+	// Check cache (500ms TTL — prevents Explorer from hammering)
+	entries := fs.getCachedDir(fullPath)
+	if entries == nil {
+		raw, err := os.ReadDir(fullPath)
+		if err != nil {
+			return -fuse.ENOENT
+		}
+		// Filter: skip zero-byte stubs mid-write, skip non-video, non-torrent, non-dir entries
+		entries = make([]os.DirEntry, 0, len(raw))
+		for _, e := range raw {
+			name := e.Name()
+			if e.IsDir() || strings.HasSuffix(name, ".torrent") {
+				entries = append(entries, e)
+				continue
+			}
+			if isVideoStub(name) {
+				// Skip stubs that are0 bytes (being written)
+				if !e.IsDir() {
+					if info, err := e.Info(); err == nil && info.Size() == 0 {
+						continue
+					}
+				}
+				entries = append(entries, e)
+				continue
+			}
+		}
+		fs.setCachedDir(fullPath, entries)
 	}
 
 	idx := int64(0)
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || isVideoStub(name) || strings.HasSuffix(name, ".torrent") {
-			if idx >= off {
-				stat := &fuse.Stat_t{}
-				if e.IsDir() {
-					stat.Mode = fuse.S_IFDIR | 0755
-				} else {
-					stat.Mode = fuse.S_IFREG | 0644
-				}
-				if !fill(name, stat, idx) {
-					break
-				}
+		if idx >= off {
+			stat := &fuse.Stat_t{}
+			if e.IsDir() {
+				stat.Mode = fuse.S_IFDIR | 0755
+			} else {
+				stat.Mode = fuse.S_IFREG | 0644
 			}
-			idx++
+			if !fill(name, stat, idx) {
+				break
+			}
 		}
+		idx++
 	}
 	return 0
 }
 
+func (fs *BitTorrentFS) getCachedDir(path string) []os.DirEntry {
+	fs.dirCacheMu.RLock()
+	defer fs.dirCacheMu.RUnlock()
+	if entry, ok := fs.dirCache[path]; ok {
+		if time.Since(entry.created) < 500*time.Millisecond {
+			return entry.entries
+		}
+	}
+	return nil
+}
+
+func (fs *BitTorrentFS) setCachedDir(path string, entries []os.DirEntry) {
+	fs.dirCacheMu.Lock()
+	defer fs.dirCacheMu.Unlock()
+	fs.dirCache[path] = dirCacheEntry{entries: entries, created: time.Now()}
+}
+
+// InvalidateDirCache clears the cache for a specific path (call after adding files).
+func (fs *BitTorrentFS) InvalidateDirCache(path string) {
+	fs.dirCacheMu.Lock()
+	defer fs.dirCacheMu.Unlock()
+	delete(fs.dirCache, path)
+}
+
 // Open opens a file for reading.
-func (fs *TiramisuFS) Open(path string, flags int) (int, uint64) {
+func (fs *BitTorrentFS) Open(path string, flags int) (int, uint64) {
 	if path == "/" || path == "" {
 		return 0, 0
 	}
@@ -175,6 +273,7 @@ func (fs *TiramisuFS) Open(path string, flags int) (int, uint64) {
 		FilePath: meta.FilePath,
 		Client:   fs.client,
 		Cache:    fs.raCache,
+		PumpSem:  fs.pumpSem,
 	})
 
 	fs.handles.Store(path, h)
@@ -182,7 +281,7 @@ func (fs *TiramisuFS) Open(path string, flags int) (int, uint64) {
 }
 
 // Read reads data from a file.
-func (fs *TiramisuFS) Read(path string, buf []byte, off int64, fh uint64) int {
+func (fs *BitTorrentFS) Read(path string, buf []byte, off int64, fh uint64) int {
 	val, ok := fs.handles.Load(path)
 	if !ok {
 		return -fuse.EBADF
@@ -197,16 +296,14 @@ func (fs *TiramisuFS) Read(path string, buf []byte, off int64, fh uint64) int {
 }
 
 // Release closes a file handle.
-func (fs *TiramisuFS) Release(path string, fh uint64) int {
-	if val, ok := fs.handles.LoadAndDelete(path); ok {
-		h := val.(*streaming.MkvHandle)
-		h.Release()
-	}
+func (fs *BitTorrentFS) Release(path string, fh uint64) int {
+	// Don't destroy the handle — VLC probes by opening/closing repeatedly.
+	// Keep the handle alive so the next Open reuses it (with its reader & cached data).
 	return 0
 }
 
 // Statfs returns filesystem statistics.
-func (fs *TiramisuFS) Statfs(path string, statvfs *fuse.Statfs_t) int {
+func (fs *BitTorrentFS) Statfs(path string, statvfs *fuse.Statfs_t) int {
 	statvfs.Bsize = 4096
 	statvfs.Blocks = 250 * 1024 * 1024
 	statvfs.Bfree = 125 * 1024 * 1024
@@ -214,6 +311,4 @@ func (fs *TiramisuFS) Statfs(path string, statvfs *fuse.Statfs_t) int {
 	return 0
 }
 
-func init() {
-	_ = atomic.LoadInt64 // ensure import
-}
+

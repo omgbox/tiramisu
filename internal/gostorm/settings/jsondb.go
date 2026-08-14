@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"tiramisu/internal/gostorm/log"
+	"bittorrentfs/internal/gostorm/log"
 )
 
 type JsonDB struct {

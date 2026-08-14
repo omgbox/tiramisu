@@ -8,42 +8,45 @@ import (
 	"time"
 )
 
-// MkvHandle represents an open file handle for a virtual .mkv file.
+const (
+	fetchMaxWaitS   = 30 // max seconds for a single FetchBlock fallback
+	fetchRetryDelay = time.Second
+)
+
+// MkvHandle represents an open file handle for a virtual file.
+// Fields ordered largest→smallest for cache-line efficiency.
 type MkvHandle struct {
-	path      string
-	url       string
-	magnet    string
-	size      int64
-	hash      string
-	fileID    int
+	client  NativeClient    // 8 bytes (pointer)
+	raCache *ReadAheadCache // 8 bytes (pointer)
+	pump    *AdaptivePump   // 8 bytes (pointer)
+	mu      sync.Mutex      // 8 bytes (state + sema)
+	url     string          // 16 bytes (pointer + len)
+	magnet  string          // 16 bytes (pointer + len)
+	path    string          // 16 bytes (pointer + len)
+	hash    string          // 16 bytes (pointer + len)
+	size    int64           // 8 bytes
+	lastOff int64           // 8 bytes
 
-	lastOff          int64 // atomic, player read offset
-	lastLen          int
-	lastTime         time.Time
-	lastActivityTime time.Time
-
-	mu       sync.Mutex
-	pump     *NativePump
-	reader   NativeReader
-	client   NativeClient
-	raCache  *ReadAheadCache
-	hasSlot  bool
-	closed   bool
+	// Grouped atomics
+	lastActivityTime int64 // atomic, unixnano
+	fileID           int
+	closed           atomic.Bool
 }
 
 // HandleConfig holds parameters for creating a new handle.
 type HandleConfig struct {
-	Path   string
-	URL    string
+	Path     string
+	URL      string
 	Magnet   string
 	Size     int64
 	Hash     string
-	FilePath string // torrent-internal file path for resolving file ID
+	FilePath string
 	Client   NativeClient
 	Cache    *ReadAheadCache
+	PumpSem  *MasterSemaphore
 }
 
-// NewHandle creates a new MkvHandle and initializes the persistent NativeReader.
+// NewHandle creates a MkvHandle with an AdaptivePump.
 func NewHandle(cfg HandleConfig) *MkvHandle {
 	h := &MkvHandle{
 		path:             cfg.Path,
@@ -53,105 +56,114 @@ func NewHandle(cfg HandleConfig) *MkvHandle {
 		hash:             cfg.Hash,
 		client:           cfg.Client,
 		raCache:          cfg.Cache,
-		lastActivityTime: time.Now(),
-		lastTime:         time.Now(),
+		lastActivityTime: time.Now().UnixNano(),
 		lastOff:          -1,
 	}
 
-	// Wake torrent engine
-	if cfg.Client != nil && cfg.Magnet != "" {
-		if err := cfg.Client.Wake(cfg.Magnet, 0); err != nil {
-			log.Printf("[Handle] Wake failed for %s: %v", cfg.Path, err)
+	if cfg.Client == nil || cfg.Magnet == "" {
+		return h
+	}
+
+	if err := cfg.Client.Wake(cfg.Magnet, 0); err != nil {
+		log.Printf("[Handle] Wake failed for %s: %v", cfg.Path, err)
+		return h
+	}
+
+	if cfg.FilePath != "" {
+		if fid, err := cfg.Client.FindFileID(cfg.Hash, cfg.FilePath); err == nil {
+			h.fileID = fid
 		} else {
-			// Resolve file ID from torrent metadata
-			if cfg.FilePath != "" {
-				if fid, err := cfg.Client.FindFileID(cfg.Hash, cfg.FilePath); err == nil {
-					h.fileID = fid
-				} else {
-					log.Printf("[Handle] FindFileID failed for %s: %v (using fallback 1)", cfg.Path, err)
-					h.fileID = 1
-				}
-			} else {
-				h.fileID = 1
-			}
-			// Create persistent reader after Wake succeeds
-			h.reader = cfg.Client.NewStreamReader(cfg.Hash, h.fileID, cfg.Size)
-			log.Printf("[Handle] Reader created for %s (fileID=%d, size=%d)", cfg.Path, h.fileID, cfg.Size)
+			log.Printf("[Handle] FindFileID failed: %v (fallback 1)", err)
+			h.fileID = 1
 		}
 	}
+
+	log.Printf("[Handle] Created for %s (fileID=%d, size=%d)", cfg.Path, h.fileID, cfg.Size)
+
+	// Start adaptive predictive pump
+	pump := NewAdaptivePump(h)
+	pump.Start()
+	h.pump = pump
 
 	return h
 }
 
-// Read serves data from cache or fetches from torrent via persistent reader.
+// Read serves data from cache or fetches from torrent via FetchBlock.
 func (h *MkvHandle) Read(buf []byte, offset int64) (int, error) {
-	h.lastActivityTime = time.Now()
-	atomic.StoreInt64(&h.lastOff, offset)
+	atomic.StoreInt64(&h.lastActivityTime, time.Now().UnixNano())
 	h.mu.Lock()
 	h.lastOff = offset
-	h.lastLen = len(buf)
-	h.lastTime = time.Now()
 	h.mu.Unlock()
 
-	// Try cache first
+	// Feed player position to the adaptive pump
+	if h.pump != nil {
+		h.pump.RecordRead(offset)
+	}
+
+	// 1. Try cache (fast path — served by pump)
 	n := h.raCache.CopyTo(h.path, buf, offset)
 	if n > 0 {
 		return n, nil
 	}
 
-	// Cache miss — use persistent NativeReader
-	if h.reader == nil {
-		return 0, ErrNoReader
-	}
-
-	n, err := h.reader.ReadAt(buf, offset)
-	if err != nil {
-		return 0, err
-	}
-
-	if n > 0 {
-		h.raCache.Put(h.path, offset, buf[:n])
-	}
-
-	return n, nil
+	// 2. Cache miss — fetch via FetchBlock with retry
+	return h.fetchWithRetry(buf, offset)
 }
 
-// Release closes the handle and cleans up resources.
+func (h *MkvHandle) fetchWithRetry(buf []byte, offset int64) (int, error) {
+	if h.client == nil {
+		return 0, fmt.Errorf("no client")
+	}
+
+	deadline := time.Now().Add(fetchMaxWaitS * time.Second)
+	var lastErr error
+
+	for attempt := 0; time.Now().Before(deadline); attempt++ {
+		if h.isClosed() {
+			return 0, fmt.Errorf("handle closed")
+		}
+
+		n, err := h.client.FetchBlock(h.hash, h.fileID, offset, buf)
+		if err == nil && n > 0 {
+			h.raCache.Put(h.path, offset, buf[:n])
+			return n, nil
+		}
+		if err != nil {
+			lastErr = err
+		}
+		time.Sleep(fetchRetryDelay)
+	}
+	return 0, fmt.Errorf("fetch timed out: %w", lastErr)
+}
+
+// Release is a no-op — handle stays alive across VLC's probing cycles.
 func (h *MkvHandle) Release() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	if h.closed {
-		return
-	}
-	h.closed = true
-
-	// Close persistent reader
-	if h.reader != nil {
-		h.reader.Close()
-		h.reader = nil
-	}
-
-	// Save player position to pump state
-	if h.pump != nil && h.pump.state != nil {
-		atomic.StoreInt64(&h.pump.state.playerOff, h.lastOff)
-	}
-
-	log.Printf("[Handle] Released: %s (lastOff=%d)", h.path, h.lastOff)
+	log.Printf("[Handle] Released: %s (lastOff=%d, pump=%v)",
+		h.path, atomic.LoadInt64(&h.lastOff), h.pump != nil)
 }
 
-// GetLastOff returns the last read offset.
+// Close fully shuts down the handle and its pump.
+func (h *MkvHandle) Close() {
+	if !h.closed.CompareAndSwap(false, true) {
+		return // already closed
+	}
+	h.mu.Lock()
+	if h.pump != nil {
+		h.pump.Stop()
+		h.pump = nil
+	}
+	h.mu.Unlock()
+}
+
+func (h *MkvHandle) isClosed() bool {
+	return h.closed.Load()
+}
+
 func (h *MkvHandle) GetLastOff() int64 {
 	return atomic.LoadInt64(&h.lastOff)
 }
 
-// IsActive returns true if the handle has been read recently.
 func (h *MkvHandle) IsActive(timeout time.Duration) bool {
-	return time.Since(h.lastActivityTime) < timeout
+	last := atomic.LoadInt64(&h.lastActivityTime)
+	return time.Since(time.Unix(0, last)) < timeout
 }
-
-// Errors
-var (
-	ErrNoClient = fmt.Errorf("no torrent client configured")
-	ErrNoReader = fmt.Errorf("no torrent reader (Wake may have failed)")
-)

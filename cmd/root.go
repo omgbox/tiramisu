@@ -10,14 +10,15 @@ import (
 	"strings"
 	"syscall"
 
-	"tiramisu/internal/config"
-	"tiramisu/internal/fusefs"
-	"tiramisu/internal/gostorm/native"
-	"tiramisu/internal/gostorm/settings"
-	"tiramisu/internal/gostorm/torr"
-	"tiramisu/internal/streaming"
-	"tiramisu/internal/stub"
-	"tiramisu/internal/warmup"
+	"bittorrentfs/internal/config"
+	"bittorrentfs/internal/fusefs"
+	"bittorrentfs/internal/gostorm/native"
+	"bittorrentfs/internal/gostorm/settings"
+	"bittorrentfs/internal/gostorm/torr"
+	"bittorrentfs/internal/streaming"
+	"bittorrentfs/internal/stub"
+	"bittorrentfs/internal/warmup"
+	"bittorrentfs/internal/winfsp"
 )
 
 var (
@@ -67,7 +68,7 @@ func Execute() {
 				log.Printf("Failed to add magnet: %v", err)
 			}
 		} else if strings.HasSuffix(arg, ".torrent") {
-			if err := addTorrent(cfg.DataDir, arg); err != nil {
+			if _, err := addTorrent(cfg.DataDir, arg); err != nil {
 				log.Printf("Failed to add torrent: %v", err)
 			}
 		} else {
@@ -108,13 +109,55 @@ func Execute() {
 	client := streaming.NewGostormAdapter(nativeClient)
 
 	// Create FUSE filesystem
-	fs := fusefs.NewTiramisuFS(cfg.DataDir, client, raCache)
+	fs := fusefs.NewBitTorrentFS(cfg.DataDir, client, raCache)
 
-	// Start watched directory
+	// Scan for existing .torrent files in data dir (watcher only catches new ones)
+	entries, err := os.ReadDir(cfg.DataDir)
+	if err == nil {
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".torrent") {
+				fullPath := filepath.Join(cfg.DataDir, e.Name())
+				log.Printf("[Start] Found existing torrent: %s", e.Name())
+				stubs, err := addTorrent(cfg.DataDir, fullPath)
+				if err != nil {
+					log.Printf("[Start] Failed to process torrent: %v", err)
+					continue
+				}
+			// Pre-wake: start torrent engine early so peers are discovered before VLC opens the file
+			for _, stubPath := range stubs {
+				meta, parseErr := stub.ParseStub(stubPath)
+				if parseErr != nil {
+					continue
+				}
+				hash := stub.ExtractHash(meta.Magnet)
+				log.Printf("[Start] Pre-waking torrent %s (hash=%s)", e.Name(), hash[:8])
+					if wakeErr := client.Wake(meta.Magnet, 0); wakeErr != nil {
+						log.Printf("[Start] Pre-wake failed for %s: %v", e.Name(), wakeErr)
+					}
+				}
+			}
+		}
+	}
+
+	// Start watched directory for new .torrent files
 	go WatchDirectory(cfg.DataDir, func(path string) {
 		log.Printf("[Watch] Processing new torrent: %s", filepath.Base(path))
-		if err := addTorrent(cfg.DataDir, path); err != nil {
+		stubs, err := addTorrent(cfg.DataDir, path)
+		if err != nil {
 			log.Printf("[Watch] Failed to process torrent: %v", err)
+			return
+		}
+		// Pre-wake for new torrents too
+		for _, stubPath := range stubs {
+			meta, parseErr := stub.ParseStub(stubPath)
+			if parseErr != nil {
+				continue
+			}
+			hash := stub.ExtractHash(meta.Magnet)
+			log.Printf("[Watch] Pre-waking torrent %s (hash=%s)", filepath.Base(path), hash[:8])
+			if wakeErr := client.Wake(meta.Magnet, 0); wakeErr != nil {
+				log.Printf("[Watch] Pre-wake failed for %s: %v", filepath.Base(path), wakeErr)
+			}
 		}
 	})
 
@@ -127,26 +170,31 @@ func Execute() {
 		fs.Unmount()
 	}()
 
+	// Extract embedded WinFsp DLL if needed
+	if _, err := winfsp.Ensure(); err != nil {
+		log.Printf("[BitTorrentFS] Warning: could not extract WinFsp DLL: %v", err)
+	}
+
 	// Mount FUSE and block
-	log.Printf("[Tiramisu] Ready — mount at %s", cfg.FuseMountPoint)
+	log.Printf("[BitTorrentFS] Ready — mount at %s", cfg.FuseMountPoint)
 	fs.Mount(cfg.FuseMountPoint)
 }
 
-func addTorrent(dataDir, torrentPath string) error {
+func addTorrent(dataDir, torrentPath string) ([]string, error) {
 	absPath, err := filepath.Abs(torrentPath)
 	if err != nil {
-		return fmt.Errorf("resolve path: %w", err)
+		return nil, fmt.Errorf("resolve path: %w", err)
 	}
 
 	stubs, err := stub.CreateStubsFromTorrent(dataDir, absPath)
 	if err != nil {
-		return fmt.Errorf("create stubs: %w", err)
+		return nil, fmt.Errorf("create stubs: %w", err)
 	}
 
 	for _, s := range stubs {
 		log.Printf("Created stub: %s", s)
 	}
-	return nil
+	return stubs, nil
 }
 
 func addMagnet(dataDir, magnetURI string) error {

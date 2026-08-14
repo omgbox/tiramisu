@@ -28,11 +28,14 @@ type NativeClient interface {
 
 // MasterSemaphore controls concurrency for data operations.
 type MasterSemaphore struct {
-	sem chan struct{}
+	sem  chan struct{}
+	limit atomic.Int32
 }
 
 func NewMasterSemaphore(limit int) *MasterSemaphore {
-	return &MasterSemaphore{sem: make(chan struct{}, limit)}
+	return &MasterSemaphore{
+		sem: make(chan struct{}, limit),
+	}
 }
 
 func (s *MasterSemaphore) Acquire() bool {
@@ -50,6 +53,10 @@ func (s *MasterSemaphore) Release() {
 
 func (s *MasterSemaphore) Len() int {
 	return len(s.sem)
+}
+
+func (s *MasterSemaphore) Cap() int {
+	return cap(s.sem)
 }
 
 // NativePumpState tracks a shared pump across multiple handles for the same file.
@@ -73,6 +80,7 @@ type NativePump struct {
 	state      *NativePumpState
 	cancel     context.CancelFunc
 	slotAcquired bool
+	pumpedBytes  int64
 
 	// Player tracking
 	lastKnownPlayerOff int64
@@ -136,13 +144,12 @@ func (p *NativePump) run(ctx context.Context, startOffset int64) {
 			p.semaphore.Release()
 			p.slotAcquired = false
 		}
-		p.reader.Close()
-		log.Printf("[Pump] Ended: %s", p.path)
+		// Don't close reader — handle owns it
+		log.Printf("[Pump] Ended: %s (pumped %d MB)", p.path, p.pumpedBytes/(1024*1024))
 	}()
 
 	chunkSize := p.raCache.ChunkSize(p.path)
 	offset := (startOffset / chunkSize) * chunkSize
-	pumpedBytes := int64(0)
 
 	for {
 		select {
@@ -154,10 +161,16 @@ func (p *NativePump) run(ctx context.Context, startOffset int64) {
 		// Skip if already cached
 		if p.raCache.Covered(p.path, offset, chunkSize) {
 			offset += chunkSize
-			if offset >= p.size && p.size > 0 {
-				offset = 0 // wrap for seeding
+			if p.size > 0 && offset >= p.size {
+				offset = 0
 			}
 			continue
+		}
+
+		// Re-anchor to player position if we're far ahead
+		playerOff := atomic.LoadInt64(&p.lastKnownPlayerOff)
+		if playerOff > 0 && offset > playerOff+chunkSize*4 {
+			offset = (playerOff / chunkSize) * chunkSize
 		}
 
 		// Read chunk from torrent
@@ -167,8 +180,7 @@ func (p *NativePump) run(ctx context.Context, startOffset int64) {
 			if err == context.Canceled || err == io.ErrClosedPipe {
 				return
 			}
-			// Interrupted (seek) — re-anchor
-			playerOff := atomic.LoadInt64(&p.lastKnownPlayerOff)
+			// On error, re-anchor to player position and back off
 			if playerOff > 0 {
 				offset = (playerOff / chunkSize) * chunkSize
 			}
@@ -178,16 +190,18 @@ func (p *NativePump) run(ctx context.Context, startOffset int64) {
 
 		if n > 0 {
 			p.raCache.Put(p.path, offset, buf[:n])
-			pumpedBytes += int64(n)
+			p.pumpedBytes += int64(n)
 			offset += int64(n)
+		} else {
+			time.Sleep(100 * time.Millisecond)
 		}
 
-		if offset >= p.size && p.size > 0 {
-			offset = 0 // wrap for seeding
+		if p.size > 0 && offset >= p.size {
+			offset = 0
 		}
 
-		// Throttle after 64MB grace period
-		if pumpedBytes > 64*1024*1024 {
+		// Throttle after initial burst
+		if p.pumpedBytes > 32*1024*1024 {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}

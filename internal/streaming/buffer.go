@@ -1,6 +1,7 @@
 package streaming
 
 import (
+	"strconv"
 	"sync"
 	"sync/atomic"
 )
@@ -54,7 +55,7 @@ type FetchFlightDedup struct {
 // If isLeader is true, the caller must call flight.Complete() when done.
 // If isLeader is false, the caller should wait on flight.done.
 func (d *FetchFlightDedup) Start(path string, offset int64) (*FetchFlight, bool) {
-	key := path + ":" + itoa(offset)
+	key := path + ":" + strconv.FormatInt(offset, 10)
 
 	// Check if there's already a flight in progress
 	if existing, loaded := d.flights.Load(key); loaded {
@@ -76,7 +77,7 @@ func (d *FetchFlightDedup) Start(path string, offset int64) (*FetchFlight, bool)
 
 // Complete marks a flight as done and removes it from the map.
 func (d *FetchFlightDedup) Complete(path string, offset int64, n int, err error) {
-	key := path + ":" + itoa(offset)
+	key := path + ":" + strconv.FormatInt(offset, 10)
 	if v, ok := d.flights.LoadAndDelete(key); ok {
 		flight := v.(*FetchFlight)
 		flight.n = n

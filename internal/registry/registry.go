@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"time"
 
-	"tiramisu/internal/metadb"
+	"bittorrentfs/internal/metadb"
 )
 
 var logger = log.New(os.Stdout, "[Registry] ", log.LstdFlags)

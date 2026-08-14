@@ -10,9 +10,9 @@ import (
 
 	"github.com/anacrolix/torrent"
 
-	"tiramisu/internal/gostorm/log"
-	"tiramisu/internal/gostorm/settings"
-	"tiramisu/internal/gostorm/torr/storage/state"
+	"bittorrentfs/internal/gostorm/log"
+	"bittorrentfs/internal/gostorm/settings"
+	"bittorrentfs/internal/gostorm/torr/storage/state"
 
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"

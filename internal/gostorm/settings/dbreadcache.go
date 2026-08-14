@@ -3,7 +3,7 @@ package settings
 import (
 	"sync"
 
-	"tiramisu/internal/gostorm/log"
+	"bittorrentfs/internal/gostorm/log"
 )
 
 type DBReadCache struct {

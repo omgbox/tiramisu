@@ -9,9 +9,9 @@ import (
 	"sort"
 	"strings"
 
-	"tiramisu/internal/gostorm/log"
+	"bittorrentfs/internal/gostorm/log"
 
-	"tiramisu/internal/gostorm/settings"
+	"bittorrentfs/internal/gostorm/settings"
 
 	"github.com/anacrolix/torrent/iplist"
 )

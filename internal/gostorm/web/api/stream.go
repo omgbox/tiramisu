@@ -1,16 +1,16 @@
 package api
 
 import (
-	"tiramisu/internal/gostorm/log"
-	"tiramisu/internal/gostorm/torrshash"
+	"bittorrentfs/internal/gostorm/log"
+	"bittorrentfs/internal/gostorm/torrshash"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 
-	"tiramisu/internal/gostorm/torr"
-	"tiramisu/internal/gostorm/torr/state"
-	"tiramisu/internal/gostorm/web/api/utils"
+	"bittorrentfs/internal/gostorm/torr"
+	"bittorrentfs/internal/gostorm/torr/state"
+	"bittorrentfs/internal/gostorm/web/api/utils"
 
 	"github.com/anacrolix/torrent"
 	"github.com/gin-gonic/gin"

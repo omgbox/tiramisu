@@ -54,18 +54,35 @@ jobs:
           CGO_LDFLAGS: "-static"
           GOFLAGS: "-tags=disable_libutp,noboltdb"
         run: |
-          go build -o tiramisu.exe -ldflags="-s -w -extldflags '-static'" -tags="disable_libutp,noboltdb" .
+          $commit = (git rev-parse --short HEAD)
+          $date = (Get-Date -Format "yyyy-MM-dd")
+          $ldflags = "-s -w -extldflags '-static' -X main.version=ci -X main.commit=$commit -X main.date=$date -trimpath"
+          go build -o bittorrentfs.exe -ldflags="$ldflags" -tags="disable_libutp,noboltdb" .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Write-Host "Build successful"
-          # Also bundle WinFsp DLL for FUSE support at runtime
+          Write-Host "Build successful (commit=$commit, date=$date)"
+
+      - name: Compress with UPX
+        shell: pwsh
+        run: |
+          $url = "https://github.com/upx/upx/releases/download/v4.2.4/upx-4.2.4-win64.zip"
+          Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\upx.zip"
+          Expand-Archive -Path "$env:TEMP\upx.zip" -DestinationPath "$env:TEMP\upx" -Force
+          & "$env:TEMP\upx\upx-4.2.4-win64\upx.exe" -9 --no-progress bittorrentfs.exe
+          $size = [math]::Round((Get-Item bittorrentfs.exe).Length / 1MB, 2)
+          Write-Host "Compressed binary: $size MB"
+
+      - name: Bundle WinFsp DLL
+        shell: pwsh
+        run: |
+          # Bundle DLL separately for users who don't want auto-extraction
           Copy-Item "C:\Program Files (x86)\WinFsp\bin\winfsp-x64.dll" . -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tiramisu-windows-amd64
+          name: bittorrentfs-windows-amd64
           path: |
-            tiramisu.exe
+            bittorrentfs.exe
             winfsp-x64.dll
           retention-days: 30
 
@@ -73,5 +90,5 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: tiramisu.exe
+          files: bittorrentfs.exe
           generate_release_notes: true

@@ -9,8 +9,8 @@ import (
 	"reflect"
 	"time"
 
-	"tiramisu/internal/gostorm/log"
-	"tiramisu/internal/gostorm/web/api/utils"
+	"bittorrentfs/internal/gostorm/log"
+	"bittorrentfs/internal/gostorm/web/api/utils"
 
 	bolt "go.etcd.io/bbolt"
 )

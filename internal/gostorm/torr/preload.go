@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"tiramisu/internal/gostorm/log"
-	"tiramisu/internal/gostorm/settings"
-	"tiramisu/internal/gostorm/torr/state"
+	"bittorrentfs/internal/gostorm/log"
+	"bittorrentfs/internal/gostorm/settings"
+	"bittorrentfs/internal/gostorm/torr/state"
 
 	"github.com/anacrolix/torrent"
 )

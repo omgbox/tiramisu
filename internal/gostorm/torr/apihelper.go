@@ -12,8 +12,8 @@ import (
 	"github.com/anacrolix/torrent/iplist"
 	"github.com/anacrolix/torrent/metainfo"
 
-	"tiramisu/internal/gostorm/log"
-	sets "tiramisu/internal/gostorm/settings"
+	"bittorrentfs/internal/gostorm/log"
+	sets "bittorrentfs/internal/gostorm/settings"
 )
 
 // saveDebounce prevents redundant BoltDB writes for the same torrent.

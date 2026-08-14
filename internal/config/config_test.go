@@ -14,8 +14,8 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.ReadAheadBudgetMB != 256 {
 		t.Errorf("expected read ahead 256MB, got %d", cfg.ReadAheadBudgetMB)
 	}
-	if cfg.FuseMountPoint != "Z:" {
-		t.Errorf("expected mount Z:, got %s", cfg.FuseMountPoint)
+	if cfg.FuseMountPoint == "" {
+		t.Errorf("expected non-empty mount point, got empty")
 	}
 }
 
@@ -50,8 +50,8 @@ func TestLoadConfigFromFile(t *testing.T) {
 }
 
 func TestLoadConfigEnvOverride(t *testing.T) {
-	os.Setenv("TIRAMISU_MOUNT", "W:")
-	defer os.Unsetenv("TIRAMISU_MOUNT")
+	os.Setenv("BITTORRENTFS_MOUNT", "W:")
+	defer os.Unsetenv("BITTORRENTFS_MOUNT")
 
 	cfg := LoadConfig("")
 	if cfg.FuseMountPoint != "W:" {

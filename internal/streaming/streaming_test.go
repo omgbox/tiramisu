@@ -165,21 +165,16 @@ func TestBufferPool(t *testing.T) {
 	pool.Put(buf)
 }
 
-func TestItoa(t *testing.T) {
-	cases := []struct {
-		n    int64
-		want string
-	}{
-		{0, "0"},
-		{1, "1"},
-		{123, "123"},
-		{9999999999, "9999999999"},
+func TestCacheKey(t *testing.T) {
+	k1 := chunkKey("file.mkv", 0)
+	k2 := chunkKey("file.mkv", 1024)
+	k3 := chunkKey("file.mkv", 0)
+
+	if k1 == k2 {
+		t.Error("different offsets should produce different keys")
 	}
-	for _, c := range cases {
-		got := itoa(c.n)
-		if got != c.want {
-			t.Errorf("itoa(%d) = %s, want %s", c.n, got, c.want)
-		}
+	if k1 != k3 {
+		t.Error("same path+offset should produce same key")
 	}
 }
 

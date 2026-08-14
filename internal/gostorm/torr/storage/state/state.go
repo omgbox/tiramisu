@@ -1,7 +1,7 @@
 package state
 
 import (
-	"tiramisu/internal/gostorm/torr/state"
+	"bittorrentfs/internal/gostorm/torr/state"
 )
 
 type CacheState struct {

@@ -51,6 +51,10 @@ func CreateStubsFromTorrent(dataDir, torrentPath string) ([]string, error) {
 	for _, f := range files {
 		path := f.BestPath()
 		fullPath := strings.Join(path, "/") // torrent paths always use forward slashes
+		// Single-file torrents return empty path from BestPath()
+		if fullPath == "" {
+			fullPath = info.Name
+		}
 		ext := filepath.Ext(fullPath)
 
 		if !videoExts[ext] {

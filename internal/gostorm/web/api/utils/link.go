@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"mime/multipart"
-	"tiramisu/internal/gostorm/torrshash"
+	"bittorrentfs/internal/gostorm/torrshash"
 	"net/http"
 	"net/url"
 	"runtime"

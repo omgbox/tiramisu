@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"tiramisu/internal/gostorm/settings"
+	"bittorrentfs/internal/gostorm/settings"
 
 	"golang.org/x/time/rate"
 )

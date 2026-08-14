@@ -8,8 +8,8 @@ import (
 
 	"github.com/anacrolix/torrent"
 
-	"tiramisu/internal/gostorm/log"
-	"tiramisu/internal/gostorm/settings"
+	"bittorrentfs/internal/gostorm/log"
+	"bittorrentfs/internal/gostorm/settings"
 )
 
 type Reader struct {

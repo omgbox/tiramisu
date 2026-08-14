@@ -58,7 +58,7 @@ func LoadConfig(configPath string) Config {
 	cfg := Config{
 		// Core
 		MasterConcurrencyLimit: 25,
-		ReadAheadBudgetMB:      256,
+		ReadAheadBudgetMB:      128,         // reduced from 256 to avoid OOM with multiple torrents
 		FuseBlockSize:          1048576,
 		StreamingThresholdKB:   128,
 		LogLevel:               "INFO",
@@ -70,7 +70,7 @@ func LoadConfig(configPath string) Config {
 
 		// Paths
 		PhysicalSourcePath: "data",
-		FuseMountPoint:     "Z:",
+		FuseMountPoint:     "T:",
 		DataDir:            "data",
 
 		// Cache
@@ -93,7 +93,7 @@ func LoadConfig(configPath string) Config {
 
 	// Resolve config path
 	if configPath == "" {
-		if p := os.Getenv("TIRAMISU_CONFIG"); p != "" {
+		if p := os.Getenv("BITTORRENTFS_CONFIG"); p != "" {
 			configPath = p
 		} else {
 			exe, err := os.Executable()
@@ -126,26 +126,26 @@ func LoadConfig(configPath string) Config {
 
 // applyEnvOverrides applies environment variable overrides (highest priority).
 func (c *Config) applyEnvOverrides() {
-	if v := os.Getenv("TIRAMISU_CONCURRENCY"); v != "" {
+	if v := os.Getenv("BITTORRENTFS_CONCURRENCY"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			c.MasterConcurrencyLimit = n
 		}
 	}
-	if v := os.Getenv("TIRAMISU_READ_AHEAD_BUDGET"); v != "" {
+	if v := os.Getenv("BITTORRENTFS_READ_AHEAD_BUDGET"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 			c.ReadAheadBudgetMB = n / (1024 * 1024)
 		}
 	}
-	if v := os.Getenv("TIRAMISU_GOSTORM_URL"); v != "" {
+	if v := os.Getenv("BITTORRENTFS_GOSTORM_URL"); v != "" {
 		c.GoStormBaseURL = v
 	}
-	if v := os.Getenv("TIRAMISU_LOG_LEVEL"); v != "" {
+	if v := os.Getenv("BITTORRENTFS_LOG_LEVEL"); v != "" {
 		c.LogLevel = strings.ToUpper(v)
 	}
-	if v := os.Getenv("TIRAMISU_MOUNT"); v != "" {
+	if v := os.Getenv("BITTORRENTFS_MOUNT"); v != "" {
 		c.FuseMountPoint = v
 	}
-	if v := os.Getenv("TIRAMISU_DATA_DIR"); v != "" {
+	if v := os.Getenv("BITTORRENTFS_DATA_DIR"); v != "" {
 		c.DataDir = v
 	}
 }
@@ -178,17 +178,22 @@ func (c *Config) finalize() {
 		if appData == "" {
 			appData = os.Getenv("APPDATA")
 		}
-		c.RootPath = filepath.Join(appData, "tiramisu")
+		c.RootPath = filepath.Join(appData, "bittorrentfs")
+
 	} else {
 		home, _ := os.UserHomeDir()
-		c.RootPath = filepath.Join(home, "tiramisu")
+		c.RootPath = filepath.Join(home, "bittorrentfs")
 	}
 
 	// Ensure data directory path is absolute
 	if !filepath.IsAbs(c.DataDir) {
-		exe, err := os.Executable()
-		if err == nil {
-			c.DataDir = filepath.Join(filepath.Dir(exe), c.DataDir)
+		if home, err := os.UserHomeDir(); err == nil {
+			c.DataDir = filepath.Join(home, "Downloads", "torrents")
+		} else {
+			exe, err := os.Executable()
+			if err == nil {
+				c.DataDir = filepath.Join(filepath.Dir(exe), c.DataDir)
+			}
 		}
 	}
 }

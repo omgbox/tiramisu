@@ -1,7 +1,7 @@
 package streaming
 
 import (
-	"tiramisu/internal/gostorm/native"
+	"bittorrentfs/internal/gostorm/native"
 )
 
 // GostormAdapter wraps the gostorm NativeClient to implement the streaming.NativeClient interface.

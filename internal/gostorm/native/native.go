@@ -6,10 +6,10 @@ import (
 	"io"
 	"net/http"
 
-	"tiramisu/internal/gostorm/torr"
-	"tiramisu/internal/gostorm/torr/state"
-	apiUtils "tiramisu/internal/gostorm/web/api/utils"
-	"tiramisu/internal/warmup"
+	"bittorrentfs/internal/gostorm/torr"
+	"bittorrentfs/internal/gostorm/torr/state"
+	apiUtils "bittorrentfs/internal/gostorm/web/api/utils"
+	"bittorrentfs/internal/warmup"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -32,6 +32,7 @@ type NativeClient struct {
 	// Stateless client
 	activeHashes  sync.Map      // Map[string]bool - Fast lookup for active torrents
 	wakeSemaphore chan struct{} // V239: Limit concurrent Wake calls (max 10)
+	activeCount   atomic.Int32 // Number of active torrents
 }
 
 // NewNativeClient creates a new native bridge client
@@ -39,6 +40,39 @@ func NewNativeClient() *NativeClient {
 	return &NativeClient{
 		wakeSemaphore: make(chan struct{}, 25), // Max 25 concurrent Wake operations
 	}
+}
+
+// ActiveTorrentCount returns the number of currently active torrents.
+func (c *NativeClient) ActiveTorrentCount() int {
+	return int(c.activeCount.Load())
+}
+
+// DynamicConnectionsLimit calculates per-torrent connection limit based on load.
+// More active torrents → higher total connections → more peers to pick from.
+func (c *NativeClient) DynamicConnectionsLimit() int {
+	active := c.ActiveTorrentCount()
+	if active <= 1 {
+		return 50 // single torrent: generous limit
+	}
+	// Scale: base 50 + 15 per additional torrent, max 80 per torrent
+	limit := 50 + (active-1)*15
+	if limit > 80 {
+		limit = 80
+	}
+	return limit
+}
+
+// RebalanceConnections adjusts per-torrent connection limits based on current load.
+func (c *NativeClient) RebalanceConnections() {
+	limit := c.DynamicConnectionsLimit()
+	c.activeHashes.Range(func(key, value interface{}) bool {
+		hash := key.(string)
+		t := torr.PeekTorrent(hash)
+		if t != nil && t.Torrent != nil {
+			t.Torrent.SetMaxEstablishedConns(limit)
+		}
+		return true
+	})
 }
 
 // Wake triggers the start of a torrent (Ghost -> Active) entirely in-memory
@@ -114,7 +148,11 @@ func (c *NativeClient) Wake(magnetUrl string, fileIdx int) error {
 		torr.SaveTorrentToDB(t)
 
 		// Optimistic active update
-		c.activeHashes.Store(hash, true)
+		if _, loaded := c.activeHashes.LoadOrStore(hash, true); !loaded {
+			c.activeCount.Add(1)
+			// Rebalance connection limits across all active torrents
+			go c.RebalanceConnections()
+		}
 	}
 
 	return nil
@@ -127,11 +165,10 @@ func (c *NativeClient) CleanupHashes() int {
 	c.activeHashes.Range(func(key, value interface{}) bool {
 		hash := key.(string)
 		// V255: Use PeekTorrent to avoid re-activating expired torrents from DB.
-		// GetTorrent() would re-activate DB-only entries, causing infinite loops.
-		// Check Torrent handle (nil = DB-only or not found, non-nil = active in engine).
 		t := torr.PeekTorrent(hash)
 		if t == nil || t.Torrent == nil {
 			c.activeHashes.Delete(hash)
+			c.activeCount.Add(-1)
 			removed++
 		}
 		return true

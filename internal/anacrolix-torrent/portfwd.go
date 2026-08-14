@@ -12,7 +12,7 @@ const UpnpDiscoverLogTag = "upnp-discover"
 
 func (cl *Client) addPortMapping(d upnp.Device, proto upnp.Protocol, internalPort int, upnpID string) {
 	logger := cl.logger.WithContextText(fmt.Sprintf("UPnP device at %v: mapping internal %v port %v", d.GetLocalIPAddress(), proto, internalPort))
-	externalPort, err := d.AddPortMapping(proto, internalPort, internalPort, upnpID, 0)
+	externalPort, err := d.AddPortMapping(proto, internalPort, internalPort, upnpID, time.Hour)
 	if err != nil {
 		logger.WithDefaultLevel(log.Warning).Printf("error: %v", err)
 		return

@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/cespare/xxhash/v2"
-	"tiramisu/internal/metadb"
+	"bittorrentfs/internal/metadb"
 )
 
 // V133: Deterministic Inode Mapping for Plex/SMB Stability

@@ -1,62 +1,79 @@
-# tiramisu
+# BitTorrentFS
 
-FUSE streaming engine for BitTorrent. Mount a virtual drive and stream torrents directly to any media player.
+FUSE streaming engine for BitTorrent. Mount a virtual drive and stream torrents directly to any media player — single binary, zero config.
+
+## Features
+
+- **Single binary** — WinFsp DLL embedded, UPX compressed (~6.5MB)
+- **FUSE virtual filesystem** — mounts as a drive letter (T:)
+- **Adaptive read-ahead** — learns player access patterns, dual-stream prefetch
+- **Multi-torrent** — 8+ concurrent streams
+- **Auto-detection** — drop `.torrent` files into watch directory, files appear instantly
+- **Zero config** — works out of the box
 
 ## Requirements
 
-- **Windows 10/11** with [WinFsp](https://github.com/winfsp/winfsp/releases) installed
-- No other dependencies — single binary
+- **Windows 10/11** (WinFsp auto-extracted on first run)
+
+## Download
+
+Download `bittorrentfs.exe` from [Releases](https://github.com/omgbox/tiramisu/releases).
 
 ## Usage
 
 ```bash
 # Stream a .torrent file
-tiramisu.exe "C:\Downloads\movie.torrent"
+bittorrentfs.exe "C:\Downloads\movie.torrent"
 
 # Stream from magnet link
-tiramisu.exe "magnet:?xt=urn:btih:abc123..."
+bittorrentfs.exe "magnet:?xt=urn:btih:abc123..."
 
-# Specify mount point
-tiramisu.exe --mount Y: "movie.torrent"
+# Mount and watch a directory for .torrent files
+bittorrentfs.exe --data-dir "C:\Downloads\torrents"
+
+# Specify custom mount point
+bittorrentfs.exe --mount Z: "movie.torrent"
 
 # Multiple torrents
-tiramisu.exe "movie1.torrent" "movie2.torrent"
-
-# Just mount (watch for .torrent files in data dir)
-tiramisu.exe --data-dir "C:\Torrents"
+bittorrentfs.exe "movie1.torrent" "movie2.torrent"
 ```
 
 ## Configuration
 
-Create `config.json` next to the binary:
+Optional `config.json` next to the binary:
 
 ```json
 {
   "master_concurrency_limit": 25,
-  "read_ahead_budget_mb": 256,
-  "fuse_mount_point": "Z:",
-  "data_dir": "data",
+  "read_ahead_budget_mb": 128,
+  "fuse_mount_point": "T:",
+  "data_dir": "C:\\Users\\you\\Downloads\\torrents",
   "disk_warmup_quota_gb": 15
 }
 ```
 
+Environment variables (prefix `BITTORRENTFS_`):
+- `BITTORRENTFS_FUSE_MOUNT_POINT=Z:`
+- `BITTORRENTFS_DATA_DIR=C:\Torrents`
+
 ## How it works
 
-1. Parses .torrent file → creates virtual .mkv stubs
-2. Mounts FUSE drive at Z:
-3. Opens Z:\movie.mkv → triggers torrent download
-4. Streams data from swarm → cache → player
-5. Drop more .torrent files into data dir → auto-detected
+1. Parses `.torrent` file → creates virtual video stubs (`.mkv`, `.mp4`)
+2. Mounts FUSE drive at `T:`
+3. Opening `T:\movie.mkv` with VLC/mpv triggers torrent download
+4. Adaptive pump fetches data ahead of the player position
+5. Drop more `.torrent` files into the watch directory → auto-detected
 
 ## Building
 
 ```bash
-# Requires WinFsp SDK installed
+# Requires WinFsp SDK
 set CPATH=C:\Program Files (x86)\WinFsp\inc\fuse
-CGO_ENABLED=1 go build -o tiramisu.exe .
+set CGO_ENABLED=1
+go build -tags "disable_libutp,noboltdb" -o bittorrentfs.exe .
 ```
 
-Or use GitHub Actions CI — push to trigger automated Windows build.
+Or push to trigger GitHub Actions CI (builds + UPX compresses automatically).
 
 ## License
 
