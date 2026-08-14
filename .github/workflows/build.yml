@@ -45,6 +45,29 @@ jobs:
           CPATH: "C:\\Program Files (x86)\\WinFsp\\inc\\fuse"
         run: go mod tidy
 
+      - name: Download WinFsp DLL for embedding
+        shell: pwsh
+        run: |
+          $dllUrl = "https://github.com/winfsp/winfsp/releases/download/v2.1/winfsp-2.1.25156.msi"
+          Write-Host "Extracting winfsp-x64.dll from WinFsp installer..."
+          $msiPath = "$env:TEMP\winfsp-dll.msi"
+          # Reuse already-downloaded MSI if present
+          if (-not (Test-Path $msiPath)) {
+            Invoke-WebRequest -Uri $dllUrl -OutFile $msiPath
+          }
+          # Extract DLL from MSI
+          $extractDir = "$env:TEMP\winfsp-dll"
+          Start-Process msiexec.exe -Wait -ArgumentList "/a", $msiPath, "/qn", "/l*v", "$env:TEMP\winfsp-dll.log"
+          # Find the DLL
+          $dll = Get-ChildItem "C:\Program Files (x86)\WinFsp\bin\winfsp-x64.dll" -ErrorAction SilentlyContinue
+          if ($dll) {
+            Copy-Item $dll.FullName "internal\winfsp\winfsp-x64.dll" -Force
+            Write-Host "Copied winfsp-x64.dll to internal/winfsp/ ($($dll.Length) bytes)"
+          } else {
+            Write-Error "winfsp-x64.dll not found after install"
+            exit 1
+          }
+
       - name: Build
         env:
           CGO_ENABLED: 1
