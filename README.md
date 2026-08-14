@@ -11,13 +11,33 @@ FUSE streaming engine for BitTorrent. Mount a virtual drive and stream torrents 
 - **Auto-detection** — drop `.torrent` files into watch directory, files appear instantly
 - **Zero config** — works out of the box
 
+## Use Cases
+
+### Instant Media Playback
+Stream movies and TV shows directly from torrents without waiting for full downloads. Open a `.torrent` file and start watching in VLC/mpv immediately — the adaptive pump fetches data ahead of playback.
+
+### Media Library Server
+Mount a watch directory (`C:\Downloads\torrents`) and drop `.torrent` files into it. Files appear on the virtual drive instantly. Combine with Plex/Jellyfin pointing at the mount for a self-updating media library.
+
+### Batch Download & Preview
+Load multiple torrents simultaneously. Browse and preview any file on the virtual drive while others download in the background. Check video quality, subtitle tracks, or audio streams before committing to a full download.
+
+### CI/CD Media Processing
+Automate video transcoding pipelines. Point your transcoder at the FUSE mount — it sees files as soon as metadata arrives from the swarm. No intermediate storage needed.
+
+### Ephemeral Workspace
+Use as a disposable filesystem for testing torrent clients, validating `.torrent` files, or demonstrating BitTorrent protocols without touching disk.
+
+### Portable Streaming
+Single 6.5MB binary with no installation. Copy to a USB drive, run on any Windows machine. WinFsp DLL auto-extracts on first run.
+
 ## Requirements
 
 - **Windows 10/11** (WinFsp auto-extracted on first run)
 
 ## Download
 
-Download `bittorrentfs.exe` from [Releases](https://github.com/omgbox/tiramisu/releases).
+Download `bittorrentfs.exe` (6.5MB) from [Releases](https://github.com/omgbox/tiramisu/releases).
 
 ## Usage
 
