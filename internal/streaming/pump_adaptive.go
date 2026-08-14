@@ -57,12 +57,14 @@ func putFetchBuf(buf []byte) {
 
 const (
 	appMinChunk    = 128 * 1024        // 128KB minimum
-	appMaxChunk    = 2 * 1024 * 1024   // 2MB maximum
-	appLeadWindow  = 4 * 1024 * 1024   // 4MB around player position
-	appTrailGap    = 2                  // trail stream starts 2 chunks ahead of lead
+	appMaxChunk    = 4 * 1024 * 1024   // 4MB maximum (up from 2MB)
+	appLeadWindow  = 8 * 1024 * 1024   // 8MB around player position (up from 4MB)
+	appTrailGap    = 4                  // trail stream starts 4 chunks ahead of lead (up from 2)
 	appProbeWindow = 5                  // track last N reads for pattern detection
 	appAdaptWindow = 5 * time.Second   // measure throughput over 5s windows
 	appMinBytesPS  = 512 * 1024        // 512 KB/s minimum target
+	appSeekBurst   = 8 * 1024 * 1024   // 8MB prefetch on seek
+	appConcurrent  = 4                 // concurrent fetch goroutines per stream
 )
 
 // pumpPhase represents the pump's current operating mode.
@@ -105,9 +107,10 @@ type AdaptivePump struct {
 	playerSpeed atomic.Int64 // bytes/sec playback speed estimate
 
 	// Pump state
-	phase          atomic.Int32 // pumpPhase as int32
+	phase          atomic.Int64 // pumpPhase as int64
 	chunkSize      atomic.Int64 // adaptive chunk size
 	bytesPerSecond atomic.Int64 // measured download speed
+	seekBurstLeft  atomic.Int64 // bytes remaining in seek burst
 
 	// Seek history for prediction (protected by mu)
 	mu         sync.Mutex
@@ -129,7 +132,7 @@ func NewAdaptivePump(handle *MkvHandle) *AdaptivePump {
 		done:   make(chan struct{}),
 	}
 	p.chunkSize.Store(int64(appMinChunk))
-	p.phase.Store(int32(phaseBootstrap))
+	p.phase.Store(int64(phaseBootstrap))
 	return p
 }
 
@@ -168,22 +171,30 @@ func (p *AdaptivePump) updatePhase(oldOff, newOff int64) {
 	}
 
 	switch {
-	case jump > 1024*1024:
-		// Large seek (>1MB) — entering seeking phase
-		p.phase.Store(int32(phaseSeeking))
+	case jump > 512*1024:
+		// Seek (>512KB) — entering seeking phase with burst
+		p.phase.Store(int64(phaseSeeking))
 		p.probeCount = 0
+		// Trigger seek burst: aggressively prefetch around new position
+		p.seekBurst(int64(appSeekBurst))
 	case jump <= appMinChunk*2 && newOff > oldOff:
 		// Small forward read — likely sequential playback
 		if p.probeCount > 2 {
-			p.phase.Store(int32(phaseSequential))
+			p.phase.Store(int64(phaseSequential))
 		}
 	default:
 		// Could be probing or small seek
 		p.probeCount++
 		if p.probeCount >= 3 {
-			p.phase.Store(int32(phaseProbe))
+			p.phase.Store(int64(phaseProbe))
 		}
 	}
+}
+
+// seekBurst sets the number of bytes to aggressively prefetch after a seek.
+func (p *AdaptivePump) seekBurst(bytes int64) {
+	// Atomic store — will be consumed by the pump loop
+	p.seekBurstLeft.Store(bytes)
 }
 
 // recordSeek stores a seek event for prediction.
@@ -265,7 +276,7 @@ func (p *AdaptivePump) adaptChunkSize() {
 	p.chunkSize.Store(targetChunk)
 }
 
-// run is the main pump loop with dual-stream fill.
+// run is the main pump loop with concurrent dual-stream fill.
 func (p *AdaptivePump) run() {
 	defer close(p.done)
 
@@ -274,7 +285,7 @@ func (p *AdaptivePump) run() {
 
 	pumpedBytes := int64(0)
 	startTime := time.Now()
-	initialBurstEnd := int64(2 * 1024 * 1024)
+	initialBurstEnd := int64(4 * 1024 * 1024) // 4MB initial burst (up from 2MB)
 	lastLogTime := startTime
 
 	for {
@@ -287,28 +298,76 @@ func (p *AdaptivePump) run() {
 		chunkSize := p.chunkSize.Load()
 		phase := pumpPhase(p.phase.Load())
 		playerOff := p.playerOff.Load()
+		seekBurst := p.seekBurstLeft.Load()
 
+		// Seek burst mode: aggressively prefetch after seek
+		if seekBurst > 0 && playerOff >= 0 {
+			var wg sync.WaitGroup
+			var mu sync.Mutex
+			fetched := int64(0)
+			for i := 0; i < appConcurrent && seekBurst > 0; i++ {
+				off := playerOff + int64(i)*chunkSize
+				if p.handle.raCache.Covered(p.handle.path, off, chunkSize) {
+					mu.Lock()
+					fetched += chunkSize
+					seekBurst -= chunkSize
+					mu.Unlock()
+					continue
+				}
+				wg.Add(1)
+				go func(offset int64) {
+					defer wg.Done()
+					n := p.fetchChunk(offset, chunkSize)
+					mu.Lock()
+					if n > 0 {
+						fetched += int64(n)
+						pumpedBytes += int64(n)
+					}
+					seekBurst -= chunkSize
+					mu.Unlock()
+				}(off)
+			}
+			wg.Wait()
+			p.seekBurstLeft.Store(seekBurst)
+			leadOffset = playerOff + fetched
+			aheadOffset = leadOffset + chunkSize*appTrailGap
+		}
+
+		// Lead stream: fill around player position
 		if playerOff >= 0 {
-			if leadOffset < 0 || playerOff > leadOffset+chunkSize*8 {
+			if leadOffset < 0 || playerOff > leadOffset+chunkSize*int64(appConcurrent) {
 				leadOffset = (playerOff / chunkSize) * chunkSize
 			}
 
-			for i := int64(0); i < 2; i++ {
+			// Launch concurrent lead fetches
+			var wg sync.WaitGroup
+			var mu sync.Mutex
+			for i := int64(0); i < int64(appConcurrent); i++ {
 				off := leadOffset + i*chunkSize
 				if p.handle.raCache.Covered(p.handle.path, off, chunkSize) {
+					mu.Lock()
 					leadOffset += chunkSize
+					mu.Unlock()
 					continue
 				}
-				n := p.fetchChunk(off, chunkSize)
-				if n > 0 {
-					pumpedBytes += int64(n)
-					leadOffset += int64(n)
-				} else {
-					leadOffset += chunkSize
-				}
+				wg.Add(1)
+				go func(offset int64) {
+					defer wg.Done()
+					n := p.fetchChunk(offset, chunkSize)
+					mu.Lock()
+					if n > 0 {
+						pumpedBytes += int64(n)
+						leadOffset += int64(n)
+					} else {
+						leadOffset += chunkSize
+					}
+					mu.Unlock()
+				}(off)
 			}
+			wg.Wait()
 		}
 
+		// Trail stream: fill ahead of lead
 		if playerOff >= 0 {
 			if aheadOffset < 0 {
 				aheadOffset = leadOffset + chunkSize*appTrailGap
@@ -319,24 +378,37 @@ func (p *AdaptivePump) run() {
 		}
 
 		if aheadOffset >= 0 {
-			for i := int64(0); i < 2; i++ {
+			var wg sync.WaitGroup
+			var mu sync.Mutex
+			for i := int64(0); i < int64(appConcurrent); i++ {
 				off := aheadOffset + i*chunkSize
 				if p.handle.size > 0 && off >= p.handle.size {
+					mu.Lock()
 					aheadOffset = 0
+					mu.Unlock()
 					break
 				}
 				if p.handle.raCache.Covered(p.handle.path, off, chunkSize) {
+					mu.Lock()
 					aheadOffset += chunkSize
+					mu.Unlock()
 					continue
 				}
-				n := p.fetchChunk(off, chunkSize)
-				if n > 0 {
-					pumpedBytes += int64(n)
-					aheadOffset += int64(n)
-				} else {
-					aheadOffset += chunkSize
-				}
+				wg.Add(1)
+				go func(offset int64) {
+					defer wg.Done()
+					n := p.fetchChunk(offset, chunkSize)
+					mu.Lock()
+					if n > 0 {
+						pumpedBytes += int64(n)
+						aheadOffset += int64(n)
+					} else {
+						aheadOffset += chunkSize
+					}
+					mu.Unlock()
+				}(off)
 			}
+			wg.Wait()
 		}
 
 		elapsed := time.Since(startTime).Seconds()
@@ -351,15 +423,15 @@ func (p *AdaptivePump) run() {
 
 		switch phase {
 		case phaseBootstrap, phaseSeeking:
-			time.Sleep(5 * time.Millisecond)
+			time.Sleep(1 * time.Millisecond) // faster catch-up
 		case phaseSequential:
 			if playerOff >= 0 && aheadOffset >= 0 && aheadOffset-playerOff > appLeadWindow {
-				time.Sleep(100 * time.Millisecond)
+				time.Sleep(50 * time.Millisecond)
 			} else {
-				time.Sleep(20 * time.Millisecond)
+				time.Sleep(5 * time.Millisecond)
 			}
 		case phaseProbe:
-			time.Sleep(30 * time.Millisecond)
+			time.Sleep(5 * time.Millisecond)
 		}
 
 		if p.handle.size > 0 && aheadOffset >= p.handle.size {
