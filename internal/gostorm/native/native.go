@@ -121,16 +121,18 @@ func (c *NativeClient) Wake(magnetUrl string, fileIdx int) error {
 	// Wait for metadata
 	if t != nil {
 		if t.Torrent != nil && t.Torrent.Info() == nil {
-			// Metadata NOT ready yet - wait with 45s timeout (Resilience)
-			timer := time.NewTimer(45 * time.Second)
+			// Metadata NOT ready yet — short timeout (5s, was 45s).
+			// Long waits block FUSE Open and stall the player.
+			// The pump retries if metadata isn't available yet.
+			timer := time.NewTimer(5 * time.Second)
 			defer timer.Stop()
 
 			select {
 			case <-t.Torrent.GotInfo():
 				// Metadata ready — fall through to log below
 			case <-timer.C:
-				log.Printf("[NativeBridge] Metadata timeout for %s", hash)
-				return fmt.Errorf("torrent metadata timeout (45s): %s", hash)
+				log.Printf("[NativeBridge] Metadata timeout (fast fail) for %s", hash)
+				return fmt.Errorf("torrent metadata not ready (5s): %s", hash)
 			}
 		}
 		pieceLenKB := 0

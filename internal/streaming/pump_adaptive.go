@@ -292,6 +292,36 @@ func (p *AdaptivePump) run() {
 	initialBurstEnd := int64(4 * 1024 * 1024) // 4MB initial burst
 	lastLogTime := startTime
 
+	// Bootstrap burst: immediately fetch first 4MB from offset 0
+	// so VLC's first read hits cache without waiting for RecordRead.
+	if p.handle.size > 0 {
+		chunkSize := p.chunkSize.Load()
+		var wg sync.WaitGroup
+		for i := int64(0); i < int64(appConcurrent) && i*chunkSize < initialBurstEnd; i++ {
+			off := i * chunkSize
+			if p.handle.raCache.Covered(p.handle.path, off, chunkSize) {
+				totalPumped += chunkSize
+				pumpedBytes += chunkSize
+				continue
+			}
+			wg.Add(1)
+			go func(offset int64) {
+				defer wg.Done()
+				n := p.fetchChunk(offset, chunkSize)
+				if n > 0 {
+					pumpedBytes += int64(n)
+					totalPumped += int64(n)
+				}
+			}(off)
+		}
+		wg.Wait()
+		if totalPumped > 0 {
+			leadOffset = totalPumped
+			aheadOffset = leadOffset + chunkSize*appTrailGap
+			log.Printf("[Pump] bootstrap prefetched %dKB from offset 0", totalPumped/1024)
+		}
+	}
+
 	for {
 		select {
 		case <-p.cancel:
@@ -315,13 +345,15 @@ func (p *AdaptivePump) run() {
 			var wg sync.WaitGroup
 			var mu sync.Mutex
 			fetched := int64(0)
-			for i := 0; i < appConcurrent && seekBurst > 0; i++ {
+			// Compute iterations upfront to avoid data race on seekBurst
+			numFetches := appConcurrent
+			if needed := int((seekBurst + chunkSize - 1) / chunkSize); needed < numFetches {
+				numFetches = needed
+			}
+			for i := 0; i < numFetches; i++ {
 				off := playerOff + int64(i)*chunkSize
 				if p.handle.raCache.Covered(p.handle.path, off, chunkSize) {
-					mu.Lock()
 					fetched += chunkSize
-					seekBurst -= chunkSize
-					mu.Unlock()
 					continue
 				}
 				wg.Add(1)
@@ -334,12 +366,15 @@ func (p *AdaptivePump) run() {
 						pumpedBytes += int64(n)
 						totalPumped += int64(n)
 					}
-					seekBurst -= chunkSize
 					mu.Unlock()
 				}(off)
 			}
 			wg.Wait()
-			p.seekBurstLeft.Store(seekBurst)
+			consumed := int64(numFetches) * chunkSize
+			if consumed > seekBurst {
+				consumed = seekBurst
+			}
+			p.seekBurstLeft.Store(seekBurst - consumed)
 			leadOffset = playerOff + fetched
 			aheadOffset = leadOffset + chunkSize*appTrailGap
 		}
@@ -492,7 +527,7 @@ func (p *AdaptivePump) run() {
 	}
 }
 
-// fetchChunk fetches a single chunk synchronously with timeout. Returns bytes fetched.
+// fetchChunk fetches a single chunk synchronously. Returns bytes fetched.
 // On failure, returns 0 — caller should advance offset to avoid getting stuck.
 func (p *AdaptivePump) fetchChunk(offset, size int64) int {
 	h := p.handle
@@ -504,37 +539,9 @@ func (p *AdaptivePump) fetchChunk(offset, size int64) int {
 		return int(size)
 	}
 
-	type fetchResult struct {
-		n   int
-		err error
-	}
-
-	// Run FetchBlock with a timeout to prevent deadlock
-	resultCh := make(chan fetchResult, 1)
-	go func() {
-		buf := make([]byte, size)
-		n, err := h.client.FetchBlock(h.hash, h.fileID, offset, buf)
-		if err == nil && n > 0 {
-			// Zero-copy: transfer buffer ownership to cache
-			h.raCache.PutOwned(h.path, offset, buf[:n])
-		}
-		resultCh <- fetchResult{n: n, err: err}
-	}()
-
-	select {
-	case res := <-resultCh:
-		if res.err != nil {
-			newSize := p.chunkSize.Load() / 2
-			if newSize < appMinChunk {
-				newSize = appMinChunk
-			}
-			p.chunkSize.Store(newSize)
-			return 0
-		}
-		return res.n
-	case <-time.After(10 * time.Second):
-		log.Printf("[Pump] fetchChunk TIMEOUT offset=%d size=%d", offset, size)
-		// Shrink chunk on timeout
+	buf := make([]byte, size)
+	n, err := h.client.FetchBlock(h.hash, h.fileID, offset, buf)
+	if err != nil {
 		newSize := p.chunkSize.Load() / 2
 		if newSize < appMinChunk {
 			newSize = appMinChunk
@@ -542,6 +549,11 @@ func (p *AdaptivePump) fetchChunk(offset, size int64) int {
 		p.chunkSize.Store(newSize)
 		return 0
 	}
+
+	if n > 0 {
+		h.raCache.PutOwned(h.path, offset, buf[:n])
+	}
+	return n
 }
 
 // Stats returns current pump statistics for monitoring.

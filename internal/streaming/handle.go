@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	fetchMaxWaitS   = 30 // max seconds for a single FetchBlock fallback
-	fetchRetryDelay = time.Second
+	fetchMaxWaitS   = 10 // max seconds for a single FetchBlock fallback (was 30, too slow for open)
+	fetchRetryDelay = 200 * time.Millisecond // retry faster (was 1s)
 )
 
 // MkvHandle represents an open file handle for a virtual file.
@@ -64,6 +64,8 @@ func NewHandle(cfg HandleConfig) *MkvHandle {
 		return h
 	}
 
+	// Wake the torrent engine — connect to peers and load metadata.
+	// addTorrent() pre-wakes on startup, so this is usually instant.
 	if err := cfg.Client.Wake(cfg.Magnet, 0); err != nil {
 		log.Printf("[Handle] Wake failed for %s: %v", cfg.Path, err)
 		return h
