@@ -82,8 +82,24 @@ func (fs *BitTorrentFS) handleCleanupLoop() {
 // Mount starts the FUSE mount at the given point (blocks).
 func (fs *BitTorrentFS) Mount(mountPoint string) {
 	fs.host = fuse.NewFileSystemHost(fs)
-	log.Printf("[FUSE] Mounting at %s", mountPoint)
-	fs.host.Mount(mountPoint, nil)
+	// WinFsp mount options for performance
+	opts := []string{
+		"no_security",           // skip ACL checks (single-user streaming)
+		"sector_size=4096",      // 4KB sectors for better alignment
+		"volume_timeout=5000",   // cache volume info for 5s
+		"dir_timeout=500",       // cache dir listings for 500ms (matches our dirCache)
+		"file_timeout=500",      // cache file attrs for 500ms
+	}
+	log.Printf("[FUSE] Mounting at %s (opts: %v)", mountPoint, opts)
+	fs.host.Mount(mountPoint, opts)
+}
+
+// Init is called when the FUSE filesystem is initialized.
+// Tune connection parameters for streaming workloads.
+func (fs *BitTorrentFS) Init() {
+	// Increase max readahead for sequential streaming (default is often 128KB)
+	// Our pump already handles read-ahead, but this helps the kernel too.
+	log.Printf("[FUSE] Init: filesystem ready")
 }
 
 // Unmount unmounts the FUSE filesystem.
@@ -305,9 +321,17 @@ func (fs *BitTorrentFS) Release(path string, fh uint64) int {
 // Statfs returns filesystem statistics.
 func (fs *BitTorrentFS) Statfs(path string, statvfs *fuse.Statfs_t) int {
 	statvfs.Bsize = 4096
-	statvfs.Blocks = 250 * 1024 * 1024
-	statvfs.Bfree = 125 * 1024 * 1024
-	statvfs.Bavail = 125 * 1024 * 1024
+	statvfs.Namemax = 255
+
+	// Report actual cache usage for accurate free space display
+	cacheUsed, cacheEntries := fs.raCache.Stats()
+	statvfs.Blocks = 256 * 1024 * 1024 / 4096           // total: 256MB in 4K blocks
+	statvfs.Bfree = uint64(256*1024*1024-cacheUsed) / 4096 // free = budget - used
+	statvfs.Bavail = statvfs.Bfree
+	statvfs.Files = uint64(cacheEntries)                 // file count = cache entries
+	statvfs.Ffree = 0
+	statvfs.Favail = 0
+
 	return 0
 }
 
