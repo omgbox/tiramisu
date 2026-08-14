@@ -82,15 +82,11 @@ func (fs *BitTorrentFS) handleCleanupLoop() {
 // Mount starts the FUSE mount at the given point (blocks).
 func (fs *BitTorrentFS) Mount(mountPoint string) {
 	fs.host = fuse.NewFileSystemHost(fs)
-	// WinFsp mount options for performance
+	// WinFsp mount options: passed as -o key1=val1,key2=val2
 	opts := []string{
-		"no_security",           // skip ACL checks (single-user streaming)
-		"sector_size=4096",      // 4KB sectors for better alignment
-		"volume_timeout=5000",   // cache volume info for 5s
-		"dir_timeout=500",       // cache dir listings for 500ms (matches our dirCache)
-		"file_timeout=500",      // cache file attrs for 500ms
+		"-o", "KeepFileCache,DirInfoTimeout=500,VolumeInfoTimeout=5000,ThreadCount=8",
 	}
-	log.Printf("[FUSE] Mounting at %s (opts: %v)", mountPoint, opts)
+	log.Printf("[FUSE] Mounting at %s", mountPoint)
 	fs.host.Mount(mountPoint, opts)
 }
 
