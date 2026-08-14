@@ -37,7 +37,7 @@ Single 6.5MB binary with no installation. Copy to a USB drive, run on any Window
 
 ## Download
 
-Download `bittorrentfs.exe` (6.5MB) from [Releases](https://github.com/omgbox/tiramisu/releases).
+Download `bittorrentfs.exe` (6.5MB) from [Releases](https://github.com/omgbox/bittorrentfs/releases).
 
 ## Usage
 
