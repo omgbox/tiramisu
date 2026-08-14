@@ -95,6 +95,19 @@ go build -tags "disable_libutp,noboltdb" -o bittorrentfs.exe .
 
 Or push to trigger GitHub Actions CI (builds + UPX compresses automatically).
 
+## Credits
+
+Built on these open source projects:
+
+| Project | Purpose |
+|---------|---------|
+| [WinFsp](https://github.com/winfsp/winfsp) + [cgofuse](https://github.com/winfsp/cgofuse) | Windows FUSE filesystem layer |
+| [anacrolix/torrent](https://github.com/anacrolix/torrent) | BitTorrent protocol implementation (local fork) |
+| [anacrolix/dht](https://github.com/anacrolix/dht/v2) | Distributed Hash Table for peer discovery |
+| [fsnotify](https://github.com/fsnotify/fsnotify) | Filesystem event notifications |
+| [bbolt](https://go.etcd.io/bbolt) | Embedded key/value database |
+| [UPX](https://github.com/upx/upx) | Executable compression |
+
 ## License
 
 GPL-3.0
