@@ -42,21 +42,35 @@ Download `bittorrentfs.exe` (6.5MB) from [Releases](https://github.com/omgbox/ti
 ## Usage
 
 ```bash
-# Stream a .torrent file
+# Stream a .torrent file directly
 bittorrentfs.exe "C:\Downloads\movie.torrent"
+# → Opens T:\movie.mkv — play in VLC/mpv
 
-# Stream from magnet link
-bittorrentfs.exe "magnet:?xt=urn:btih:abc123..."
-
-# Mount and watch a directory for .torrent files
+# Watch a folder: drop .torrents, files appear instantly
 bittorrentfs.exe --data-dir "C:\Downloads\torrents"
+# → T:\ is mounted. Any .torrent you drop in that folder
+#   instantly creates a virtual file on T:\
 
-# Specify custom mount point
+# Watch folder + magnet link
+bittorrentfs.exe --data-dir "C:\Downloads\torrents" "magnet:?xt=urn:btih:abc123..."
+
+# Multiple torrents at once
+bittorrentfs.exe "movie1.torrent" "movie2.torrent" "show.s01e01.torrent"
+
+# Custom mount point
 bittorrentfs.exe --mount Z: "movie.torrent"
 
-# Multiple torrents
-bittorrentfs.exe "movie1.torrent" "movie2.torrent"
+# Specify download location for torrent data
+bittorrentfs.exe --download-dir "D:\Cache" "movie.torrent"
 ```
+
+**Typical workflow:**
+1. Run `bittorrentfs.exe --data-dir "C:\Downloads\torrents"`
+2. Mount appears at `T:`
+3. Drop `.torrent` files into `C:\Downloads\torrents`
+4. Files appear on `T:\` instantly
+5. Open any `.mkv`/`.mp4` in VLC — streaming starts immediately
+6. Eject with Ctrl+C — cache is retained for next session
 
 ## Configuration
 
