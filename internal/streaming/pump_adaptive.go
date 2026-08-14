@@ -56,16 +56,17 @@ func putFetchBuf(buf []byte) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const (
-	appMinChunk    = 128 * 1024        // 128KB minimum
-	appMaxChunk    = 2 * 1024 * 1024   // 2MB maximum
-	appLeadWindow  = 8 * 1024 * 1024   // 8MB around player position
-	appTrailGap    = 4                  // trail stream starts 4 chunks ahead of lead
-	appProbeWindow = 5                  // track last N reads for pattern detection
-	appAdaptWindow = 5 * time.Second   // measure throughput over 5s windows
-	appMinBytesPS  = 512 * 1024        // 512 KB/s minimum target
-	appSeekBurst   = 4 * 1024 * 1024   // 4MB prefetch on seek
-	appConcurrent  = 2                 // concurrent fetch goroutines per stream
-	appMaxCacheMB  = 256               // hard memory ceiling for cache
+	appMinChunk       = 128 * 1024        // 128KB minimum
+	appMaxChunk       = 4 * 1024 * 1024   // 4MB maximum
+	appLeadWindow     = 8 * 1024 * 1024   // 8MB around player position
+	appTrailGap       = 4                 // trail stream starts 4 chunks ahead of lead
+	appProbeWindow    = 5                 // track last N reads for pattern detection
+	appAdaptWindow    = 5 * time.Second   // measure throughput over 5s windows
+	appMinBytesPS     = 512 * 1024        // 512 KB/s minimum target
+	appSeekBurst      = 4 * 1024 * 1024   // 4MB prefetch on seek
+	appConcurrent     = 4                 // concurrent fetch goroutines per stream
+	appMaxCacheMB     = 256               // hard memory ceiling for cache
+	appSpeedWindowSec = 5                 // speed measurement window in seconds
 )
 
 // pumpPhase represents the pump's current operating mode.
@@ -285,8 +286,10 @@ func (p *AdaptivePump) run() {
 	aheadOffset := int64(-1)
 
 	pumpedBytes := int64(0)
+	totalPumped := int64(0)
 	startTime := time.Now()
-	initialBurstEnd := int64(4 * 1024 * 1024) // 4MB initial burst (up from 2MB)
+	windowStart := time.Now()
+	initialBurstEnd := int64(4 * 1024 * 1024) // 4MB initial burst
 	lastLogTime := startTime
 
 	for {
@@ -329,6 +332,7 @@ func (p *AdaptivePump) run() {
 					if n > 0 {
 						fetched += int64(n)
 						pumpedBytes += int64(n)
+						totalPumped += int64(n)
 					}
 					seekBurst -= chunkSize
 					mu.Unlock()
@@ -364,6 +368,7 @@ func (p *AdaptivePump) run() {
 					mu.Lock()
 					if n > 0 {
 						pumpedBytes += int64(n)
+						totalPumped += int64(n)
 						leadOffset += int64(n)
 					} else {
 						leadOffset += chunkSize
@@ -408,6 +413,7 @@ func (p *AdaptivePump) run() {
 					mu.Lock()
 					if n > 0 {
 						pumpedBytes += int64(n)
+						totalPumped += int64(n)
 						aheadOffset += int64(n)
 					} else {
 						aheadOffset += chunkSize
@@ -419,12 +425,38 @@ func (p *AdaptivePump) run() {
 		}
 
 		elapsed := time.Since(startTime).Seconds()
-		if elapsed > 0 {
+		windowElapsed := time.Since(windowStart).Seconds()
+
+		// Windowed speed measurement: reset every appSpeedWindowSec to track recent throughput
+		if windowElapsed >= float64(appSpeedWindowSec) {
+			if windowElapsed > 0 {
+				p.bytesPerSecond.Store(int64(float64(pumpedBytes) / windowElapsed))
+				p.adaptChunkSize()
+			}
+			pumpedBytes = 0
+			windowStart = time.Now()
+		} else if elapsed > 0 {
+			// During first window, use cumulative to bootstrap
 			p.bytesPerSecond.Store(int64(float64(pumpedBytes) / elapsed))
 			p.adaptChunkSize()
 		}
 
-		if pumpedBytes < initialBurstEnd {
+		if totalPumped < initialBurstEnd {
+			// Prevent hot-spin: always sleep briefly to yield CPU
+			time.Sleep(5 * time.Millisecond)
+			// Log periodically even during initial burst
+			now := time.Now()
+			if now.Sub(lastLogTime) >= 10*time.Second {
+				lastLogTime = now
+				usedMB := int64(0)
+				if p.handle.raCache != nil {
+					u, _ := p.handle.raCache.Stats()
+					usedMB = u / (1024 * 1024)
+				}
+				log.Printf("[Pump] %s chunk=%dKB speed=%dKB/s player=%dMB ahead=%dMB cached=%dMB totalPumped=%dMB",
+					phase, chunkSize/1024, p.bytesPerSecond.Load()/1024,
+					playerOff/(1024*1024), aheadOffset/(1024*1024), usedMB, totalPumped/(1024*1024))
+			}
 			continue
 		}
 
@@ -433,12 +465,12 @@ func (p *AdaptivePump) run() {
 			time.Sleep(1 * time.Millisecond) // faster catch-up
 		case phaseSequential:
 			if playerOff >= 0 && aheadOffset >= 0 && aheadOffset-playerOff > appLeadWindow {
-				time.Sleep(50 * time.Millisecond)
+				time.Sleep(10 * time.Millisecond) // reduced from 50ms — keep pipeline fed
 			} else {
-				time.Sleep(5 * time.Millisecond)
+				time.Sleep(2 * time.Millisecond)
 			}
 		case phaseProbe:
-			time.Sleep(5 * time.Millisecond)
+			time.Sleep(2 * time.Millisecond)
 		}
 
 		if p.handle.size > 0 && aheadOffset >= p.handle.size {
@@ -460,7 +492,7 @@ func (p *AdaptivePump) run() {
 	}
 }
 
-// fetchChunk fetches a single chunk synchronously. Returns bytes fetched.
+// fetchChunk fetches a single chunk synchronously with timeout. Returns bytes fetched.
 // On failure, returns 0 — caller should advance offset to avoid getting stuck.
 func (p *AdaptivePump) fetchChunk(offset, size int64) int {
 	h := p.handle
@@ -472,12 +504,37 @@ func (p *AdaptivePump) fetchChunk(offset, size int64) int {
 		return int(size)
 	}
 
-	// Allocate fresh buffer — not from pool, since PutOwned transfers ownership to cache.
-	// Using the pool here would cause a data race: cache holds buf while pool reuses same backing array.
-	buf := make([]byte, size)
-	n, err := h.client.FetchBlock(h.hash, h.fileID, offset, buf)
-	if err != nil {
-		// Shrink chunk on error
+	type fetchResult struct {
+		n   int
+		err error
+	}
+
+	// Run FetchBlock with a timeout to prevent deadlock
+	resultCh := make(chan fetchResult, 1)
+	go func() {
+		buf := make([]byte, size)
+		n, err := h.client.FetchBlock(h.hash, h.fileID, offset, buf)
+		if err == nil && n > 0 {
+			// Zero-copy: transfer buffer ownership to cache
+			h.raCache.PutOwned(h.path, offset, buf[:n])
+		}
+		resultCh <- fetchResult{n: n, err: err}
+	}()
+
+	select {
+	case res := <-resultCh:
+		if res.err != nil {
+			newSize := p.chunkSize.Load() / 2
+			if newSize < appMinChunk {
+				newSize = appMinChunk
+			}
+			p.chunkSize.Store(newSize)
+			return 0
+		}
+		return res.n
+	case <-time.After(10 * time.Second):
+		log.Printf("[Pump] fetchChunk TIMEOUT offset=%d size=%d", offset, size)
+		// Shrink chunk on timeout
 		newSize := p.chunkSize.Load() / 2
 		if newSize < appMinChunk {
 			newSize = appMinChunk
@@ -485,12 +542,6 @@ func (p *AdaptivePump) fetchChunk(offset, size int64) int {
 		p.chunkSize.Store(newSize)
 		return 0
 	}
-
-	if n > 0 {
-		// Zero-copy: transfer buffer ownership to cache
-		h.raCache.PutOwned(h.path, offset, buf[:n])
-	}
-	return n
 }
 
 // Stats returns current pump statistics for monitoring.

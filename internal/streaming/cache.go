@@ -182,21 +182,36 @@ func (c *ReadAheadCache) PutOwned(path string, offset int64, buf []byte) {
 }
 
 // CopyTo copies cached data into buf at the given offset. Returns bytes copied.
+// Handles both exact-offset reads and reads within a cached chunk range.
 func (c *ReadAheadCache) CopyTo(path string, buf []byte, offset int64) int {
-	key := chunkKey(path, offset)
 	shard := c.shardFor(path)
 
 	shard.mu.RLock()
-	b, ok := shard.buffers[key]
-	shard.mu.RUnlock()
+	defer shard.mu.RUnlock()
 
-	if !ok {
-		return 0
+	// Fast path: exact key match (pump-aligned reads)
+	key := chunkKey(path, offset)
+	if b, ok := shard.buffers[key]; ok {
+		n := copy(buf, b.data)
+		atomic.StoreInt64(&b.lastAccess, time.Now().UnixNano())
+		return n
 	}
 
-	n := copy(buf, b.data)
-	atomic.StoreInt64(&b.lastAccess, time.Now().UnixNano())
-	return n
+	// Slow path: find a buffer covering this offset (VLC reads at arbitrary offsets)
+	for _, b := range shard.buffers {
+		if b.start <= offset && offset < b.end {
+			localOff := offset - b.start
+			remaining := b.end - offset
+			toCopy := int64(len(buf))
+			if toCopy > remaining {
+				toCopy = remaining
+			}
+			n := copy(buf, b.data[localOff:localOff+toCopy])
+			atomic.StoreInt64(&b.lastAccess, time.Now().UnixNano())
+			return n
+		}
+	}
+	return 0
 }
 
 // Get returns a copy of cached data. Caller must NOT modify the returned slice.
@@ -223,15 +238,27 @@ func (c *ReadAheadCache) Get(path string, offset, size int64) ([]byte, int) {
 }
 
 // Covered checks if a byte range is already cached (no allocation).
+// Handles both exact-offset matches and range checks within cached chunks.
 func (c *ReadAheadCache) Covered(path string, offset, size int64) bool {
-	key := chunkKey(path, offset)
 	shard := c.shardFor(path)
 
 	shard.mu.RLock()
-	b, ok := shard.buffers[key]
-	shard.mu.RUnlock()
+	defer shard.mu.RUnlock()
 
-	return ok && (b.end-b.start) >= size
+	// Fast path: exact key match
+	key := chunkKey(path, offset)
+	if b, ok := shard.buffers[key]; ok {
+		return (b.end - b.start) >= size
+	}
+
+	// Slow path: find a buffer covering this range
+	for _, b := range shard.buffers {
+		if b.start <= offset && offset < b.end {
+			remaining := b.end - offset
+			return remaining >= size
+		}
+	}
+	return false
 }
 
 // MaxCachedOffset returns the highest cached byte end for a path.
