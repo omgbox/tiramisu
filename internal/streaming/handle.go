@@ -47,6 +47,8 @@ type HandleConfig struct {
 }
 
 // NewHandle creates a MkvHandle with an AdaptivePump.
+// The pump starts immediately; torrent init (Wake + FindFileID) runs async
+// so FUSE Open returns instantly and doesn't block Explorer/VLC.
 func NewHandle(cfg HandleConfig) *MkvHandle {
 	h := &MkvHandle{
 		path:             cfg.Path,
@@ -64,30 +66,39 @@ func NewHandle(cfg HandleConfig) *MkvHandle {
 		return h
 	}
 
-	// Wake the torrent engine — connect to peers and load metadata.
-	// addTorrent() pre-wakes on startup, so this is usually instant.
+	// Start pump immediately with fileID=0 (fast path, non-blocking).
+	// Pump fetches will fail initially but retry; once async init completes
+	// the fileID is set and subsequent fetches succeed.
+	pump := NewAdaptivePump(h)
+	pump.Start()
+	h.pump = pump
+
+	log.Printf("[Handle] Created for %s (size=%d, async init)", cfg.Path, cfg.Size)
+
+	// Async torrent init: Wake + FindFileID in background.
+	// This unblocks FUSE Open so Explorer/VLC don't freeze.
+	go h.asyncInit(cfg)
+
+	return h
+}
+
+// asyncInit wakes the torrent engine and resolves the file ID in the background.
+// The pump retries fetches until this completes, at which point fileID is set.
+func (h *MkvHandle) asyncInit(cfg HandleConfig) {
 	if err := cfg.Client.Wake(cfg.Magnet, 0); err != nil {
 		log.Printf("[Handle] Wake failed for %s: %v", cfg.Path, err)
-		return h
+		return
 	}
 
 	if cfg.FilePath != "" {
 		if fid, err := cfg.Client.FindFileID(cfg.Hash, cfg.FilePath); err == nil {
 			h.fileID = fid
+			log.Printf("[Handle] Async init complete: %s fileID=%d", cfg.Path, fid)
 		} else {
 			log.Printf("[Handle] FindFileID failed: %v (fallback 1)", err)
 			h.fileID = 1
 		}
 	}
-
-	log.Printf("[Handle] Created for %s (fileID=%d, size=%d)", cfg.Path, h.fileID, cfg.Size)
-
-	// Start adaptive predictive pump
-	pump := NewAdaptivePump(h)
-	pump.Start()
-	h.pump = pump
-
-	return h
 }
 
 // Read serves data from cache or fetches from torrent via FetchBlock.
