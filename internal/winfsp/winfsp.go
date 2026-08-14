@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -24,13 +25,36 @@ func IsInstalled() bool {
 		programFiles = `C:\Program Files (x86)`
 	}
 	
-	fsptool := filepath.Join(programFiles, "WinFsp", "bin", "fsptool-x64.exe")
-	if _, err := os.Stat(fsptool); os.IsNotExist(err) {
-		// Also check system32
-		fsptool = filepath.Join(os.Getenv("SystemRoot"), "System32", "fsptool-x64.exe")
-		if _, err := os.Stat(fsptool); os.IsNotExist(err) {
-			return false
+	// Check both possible locations
+	paths := []string{
+		filepath.Join(programFiles, "WinFsp", "bin", "fsptool-x64.exe"),
+		filepath.Join(programFiles, "WinFsp", "SxS", "bin", "fsptool-x64.exe"),
+	}
+	
+	var fsptool string
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			fsptool = p
+			break
 		}
+	}
+	
+	// Also check SxS subdirectory with version folder
+	sxsDir := filepath.Join(programFiles, "WinFsp", "SxS")
+	if entries, err := os.ReadDir(sxsDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() && strings.HasPrefix(entry.Name(), "sxs.") {
+				p := filepath.Join(sxsDir, entry.Name(), "bin", "fsptool-x64.exe")
+				if _, err := os.Stat(p); err == nil {
+					fsptool = p
+					break
+				}
+			}
+		}
+	}
+	
+	if fsptool == "" {
+		return false
 	}
 	
 	// Run fsptool lsdrv to check for loaded driver
