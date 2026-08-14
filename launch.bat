@@ -1,2 +1,2 @@
 @echo off
-"C:\projects\tiramisu\bittorrentfs.exe" 2> "C:\Users\vos\AppData\Local\Temp\btfs-err.txt"
+"%~dp0bittorrentfs.exe" 2> "%TEMP%\btfs-err.txt"
