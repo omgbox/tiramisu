@@ -186,30 +186,40 @@ func (c *ReadAheadCache) PutOwned(path string, offset int64, buf []byte) {
 func (c *ReadAheadCache) CopyTo(path string, buf []byte, offset int64) int {
 	shard := c.shardFor(path)
 
-	shard.mu.RLock()
-	defer shard.mu.RUnlock()
-
 	// Fast path: exact key match (pump-aligned reads)
 	key := chunkKey(path, offset)
-	if b, ok := shard.buffers[key]; ok {
+	shard.mu.RLock()
+	b, ok := shard.buffers[key]
+	shard.mu.RUnlock()
+
+	if ok {
 		n := copy(buf, b.data)
 		atomic.StoreInt64(&b.lastAccess, time.Now().UnixNano())
 		return n
 	}
 
 	// Slow path: find a buffer covering this offset (VLC reads at arbitrary offsets)
+	// Copy happens outside lock to avoid blocking Put/PutOwned (pump starvation).
+	shard.mu.RLock()
+	var candidate *raBuffer
 	for _, b := range shard.buffers {
 		if b.start <= offset && offset < b.end {
-			localOff := offset - b.start
-			remaining := b.end - offset
-			toCopy := int64(len(buf))
-			if toCopy > remaining {
-				toCopy = remaining
-			}
-			n := copy(buf, b.data[localOff:localOff+toCopy])
-			atomic.StoreInt64(&b.lastAccess, time.Now().UnixNano())
-			return n
+			candidate = b
+			break
 		}
+	}
+	shard.mu.RUnlock()
+
+	if candidate != nil {
+		localOff := offset - candidate.start
+		remaining := candidate.end - offset
+		toCopy := int64(len(buf))
+		if toCopy > remaining {
+			toCopy = remaining
+		}
+		n := copy(buf, candidate.data[localOff:localOff+toCopy])
+		atomic.StoreInt64(&candidate.lastAccess, time.Now().UnixNano())
+		return n
 	}
 	return 0
 }
@@ -242,22 +252,26 @@ func (c *ReadAheadCache) Get(path string, offset, size int64) ([]byte, int) {
 func (c *ReadAheadCache) Covered(path string, offset, size int64) bool {
 	shard := c.shardFor(path)
 
-	shard.mu.RLock()
-	defer shard.mu.RUnlock()
-
 	// Fast path: exact key match
 	key := chunkKey(path, offset)
-	if b, ok := shard.buffers[key]; ok {
+	shard.mu.RLock()
+	b, ok := shard.buffers[key]
+	shard.mu.RUnlock()
+
+	if ok {
 		return (b.end - b.start) >= size
 	}
 
 	// Slow path: find a buffer covering this range
+	shard.mu.RLock()
 	for _, b := range shard.buffers {
 		if b.start <= offset && offset < b.end {
 			remaining := b.end - offset
+			shard.mu.RUnlock()
 			return remaining >= size
 		}
 	}
+	shard.mu.RUnlock()
 	return false
 }
 

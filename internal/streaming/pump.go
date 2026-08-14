@@ -24,6 +24,7 @@ type NativeClient interface {
 	FetchBlock(hash string, fileID int, offset int64, buf []byte) (int, error)
 	RemoveTorrent(hash string) error
 	FindFileID(hash string, filePath string) (int, error)
+	IsTorrentActive(hash string) bool
 }
 
 // MasterSemaphore controls concurrency for data operations.

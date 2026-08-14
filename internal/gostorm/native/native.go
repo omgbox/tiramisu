@@ -100,8 +100,11 @@ func (c *NativeClient) Wake(magnetUrl string, fileIdx int) error {
 		// V255: Use PeekTorrent to check RAM only, not re-activate from DB.
 		if existing := torr.PeekTorrent(hash); existing != nil && existing.Torrent != nil {
 			t = existing
-			// V265: If we have an existing torrent, we fall through to the metadata check
-			// instead of returning nil, to ensure Open waits if metadata isn't ready.
+			// Fast path: if metadata already ready, return immediately.
+			// No need to wait for GotInfo — pre-wake already loaded it.
+			if t.Torrent.Info() != nil {
+				return nil
+			}
 		} else {
 			// If not in core but in our map, remove it and proceed to add
 			c.activeHashes.Delete(hash)
@@ -121,18 +124,18 @@ func (c *NativeClient) Wake(magnetUrl string, fileIdx int) error {
 	// Wait for metadata
 	if t != nil {
 		if t.Torrent != nil && t.Torrent.Info() == nil {
-			// Metadata NOT ready yet — short timeout (5s, was 45s).
-			// Long waits block FUSE Open and stall the player.
-			// The pump retries if metadata isn't available yet.
-			timer := time.NewTimer(5 * time.Second)
+			// Metadata NOT ready yet — 15s timeout (was 45s, reduced to 5s too aggressive).
+			// Pre-wake loads metadata at startup, so this is usually instant.
+			// 15s handles slow DHT discovery without blocking FUSE too long.
+			timer := time.NewTimer(15 * time.Second)
 			defer timer.Stop()
 
 			select {
 			case <-t.Torrent.GotInfo():
 				// Metadata ready — fall through to log below
 			case <-timer.C:
-				log.Printf("[NativeBridge] Metadata timeout (fast fail) for %s", hash)
-				return fmt.Errorf("torrent metadata not ready (5s): %s", hash)
+				log.Printf("[NativeBridge] Metadata timeout for %s", hash)
+				return fmt.Errorf("torrent metadata timeout (15s): %s", hash)
 			}
 		}
 		pieceLenKB := 0
@@ -158,6 +161,14 @@ func (c *NativeClient) Wake(magnetUrl string, fileIdx int) error {
 	}
 
 	return nil
+}
+
+// IsTorrentActive reports whether the torrent engine still has the torrent live
+// in RAM with an active client handle (not an expired DB ghost). Used by FUSE
+// handle cleanup to avoid tearing down a stream the user may pause and resume.
+func (c *NativeClient) IsTorrentActive(hash string) bool {
+	t := torr.PeekTorrent(hash)
+	return t != nil && t.Torrent != nil
 }
 
 // CleanupHashes removes hashes from the local map that are no longer present in the GoStorm core.

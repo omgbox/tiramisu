@@ -165,6 +165,11 @@ func (h *MkvHandle) GetLastOff() int64 {
 	return atomic.LoadInt64(&h.lastOff)
 }
 
+// GetHash returns the torrent info-hash for this handle.
+func (h *MkvHandle) GetHash() string {
+	return h.hash
+}
+
 func (h *MkvHandle) IsActive(timeout time.Duration) bool {
 	last := atomic.LoadInt64(&h.lastActivityTime)
 	return time.Since(time.Unix(0, last)) < timeout

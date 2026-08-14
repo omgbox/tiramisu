@@ -66,7 +66,6 @@ const (
 	appSeekBurst      = 4 * 1024 * 1024   // 4MB prefetch on seek
 	appConcurrent     = 4                 // concurrent fetch goroutines per stream
 	appMaxCacheMB     = 256               // hard memory ceiling for cache
-	appSpeedWindowSec = 5                 // speed measurement window in seconds
 )
 
 // pumpPhase represents the pump's current operating mode.
@@ -288,7 +287,6 @@ func (p *AdaptivePump) run() {
 	pumpedBytes := int64(0)
 	totalPumped := int64(0)
 	startTime := time.Now()
-	windowStart := time.Now()
 	initialBurstEnd := int64(4 * 1024 * 1024) // 4MB initial burst
 	lastLogTime := startTime
 
@@ -460,19 +458,8 @@ func (p *AdaptivePump) run() {
 		}
 
 		elapsed := time.Since(startTime).Seconds()
-		windowElapsed := time.Since(windowStart).Seconds()
-
-		// Windowed speed measurement: reset every appSpeedWindowSec to track recent throughput
-		if windowElapsed >= float64(appSpeedWindowSec) {
-			if windowElapsed > 0 {
-				p.bytesPerSecond.Store(int64(float64(pumpedBytes) / windowElapsed))
-				p.adaptChunkSize()
-			}
-			pumpedBytes = 0
-			windowStart = time.Now()
-		} else if elapsed > 0 {
-			// During first window, use cumulative to bootstrap
-			p.bytesPerSecond.Store(int64(float64(pumpedBytes) / elapsed))
+		if elapsed > 0 {
+			p.bytesPerSecond.Store(int64(float64(totalPumped) / elapsed))
 			p.adaptChunkSize()
 		}
 

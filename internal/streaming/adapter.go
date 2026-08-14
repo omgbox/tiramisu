@@ -40,6 +40,11 @@ func (a *GostormAdapter) FindFileID(hash string, filePath string) (int, error) {
 	return a.inner.FindFileID(hash, filePath)
 }
 
+// IsTorrentActive reports whether the torrent engine still has the torrent live in RAM.
+func (a *GostormAdapter) IsTorrentActive(hash string) bool {
+	return a.inner.IsTorrentActive(hash)
+}
+
 // GostormReaderAdapter wraps gostorm's NativeReader to implement streaming.NativeReader.
 type GostormReaderAdapter struct {
 	inner *native.NativeReader

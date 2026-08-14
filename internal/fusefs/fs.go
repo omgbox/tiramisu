@@ -66,8 +66,11 @@ func (fs *BitTorrentFS) handleCleanupLoop() {
 		case <-ticker.C:
 			fs.handles.Range(func(key, val any) bool {
 				h := val.(*streaming.MkvHandle)
-			// Close handles idle for 5min that aren't actively being read
-			if !h.IsActive(5 * time.Minute) {
+				// Only close handles that are both idle AND whose torrent has been
+				// fully dropped by the engine. A paused stream's torrent stays live in
+				// RAM (TorrentDisconnectTimeout=1800s), so we keep its handle & pump
+				// to allow instant resume. Reap only once the engine drops it.
+				if !h.IsActive(5*time.Minute) && !fs.client.IsTorrentActive(h.GetHash()) {
 					path := key.(string)
 					log.Printf("[FUSE] Closing idle handle: %s", path)
 					h.Close()
