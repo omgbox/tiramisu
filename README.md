@@ -111,7 +111,9 @@ Or push to trigger GitHub Actions CI (builds + UPX compresses automatically).
 
 ## Credits
 
-Built on these open source projects:
+Derived from [MrRobotoGit/tiramisu](https://github.com/MrRobotoGit/tiramisu) — a BitTorrent streaming engine for Windows.
+
+Additional dependencies:
 
 | Project | Purpose |
 |---------|---------|
