@@ -170,9 +170,9 @@ func Execute() {
 		fs.Unmount()
 	}()
 
-	// Extract embedded WinFsp DLL if needed
-	if _, err := winfsp.Ensure(); err != nil {
-		log.Printf("[BitTorrentFS] Warning: could not extract WinFsp DLL: %v", err)
+	// Auto-install WinFsp if not present
+	if err := winfsp.Ensure(); err != nil {
+		log.Fatalf("[BitTorrentFS] WinFsp installation failed: %v", err)
 	}
 
 	// Mount FUSE and block
