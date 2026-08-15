@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 
 	"github.com/anacrolix/torrent/metainfo"
 )
@@ -29,10 +31,41 @@ var videoExts = map[string]bool{
 	".webm": true,
 }
 
+// openForRead opens a file for reading. On Windows, uses FILE_SHARE_DELETE
+// so the file can be deleted while we hold it open (required for auto-cleanup).
+func openForRead(path string) (*os.File, error) {
+	if runtime.GOOS != "windows" {
+		return os.Open(path)
+	}
+	pathp, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return os.Open(path)
+	}
+	h, err := syscall.CreateFile(
+		pathp,
+		syscall.GENERIC_READ,
+		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE,
+		nil,
+		syscall.OPEN_EXISTING,
+		syscall.FILE_ATTRIBUTE_NORMAL,
+		0,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(h), path), nil
+}
+
 // CreateStubsFromTorrent parses a .torrent file and creates .mkv stubs in dataDir.
 // Returns list of created stub paths.
 func CreateStubsFromTorrent(dataDir, torrentPath string) ([]string, error) {
-	mi, err := metainfo.LoadFromFile(torrentPath)
+	f, err := openForRead(torrentPath)
+	if err != nil {
+		return nil, fmt.Errorf("open torrent: %w", err)
+	}
+	defer f.Close()
+
+	mi, err := metainfo.Load(f)
 	if err != nil {
 		return nil, fmt.Errorf("load torrent: %w", err)
 	}
@@ -163,4 +196,47 @@ func ExtractHash(magnetURI string) string {
 		return ""
 	}
 	return fmt.Sprintf("%x", parsed.InfoHash)
+}
+
+// RemoveStubs scans dataDir for .mkv stubs whose magnet hash matches hashHex,
+// removes them, and cleans up empty parent directories.
+// Returns the number of stubs removed.
+func RemoveStubs(dataDir, hashHex string) int {
+	removed := 0
+
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		return 0
+	}
+
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		stubDir := filepath.Join(dataDir, e.Name())
+		stubFiles, readErr := os.ReadDir(stubDir)
+		if readErr != nil {
+			continue
+		}
+		for _, sf := range stubFiles {
+			if sf.IsDir() || !strings.HasSuffix(sf.Name(), ".mkv") {
+				continue
+			}
+			meta, parseErr := ParseStub(filepath.Join(stubDir, sf.Name()))
+			if parseErr != nil {
+				continue
+			}
+			h := ExtractHash(meta.Magnet)
+			if h == hashHex {
+				os.Remove(filepath.Join(stubDir, sf.Name()))
+				removed++
+			}
+		}
+		// Remove empty stub directories
+		if remaining, _ := os.ReadDir(stubDir); len(remaining) == 0 {
+			os.Remove(stubDir)
+		}
+	}
+
+	return removed
 }

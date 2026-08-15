@@ -115,6 +115,22 @@ func (fs *BitTorrentFS) Unmount() {
 	}
 }
 
+// CloseHandleByHash closes and removes any FUSE handle whose torrent hash matches.
+// Also invalidates the directory cache so the next Readdir picks up the change.
+func (fs *BitTorrentFS) CloseHandleByHash(hash string) {
+	fs.handles.Range(func(key, val any) bool {
+		h := val.(*streaming.MkvHandle)
+		if h.GetHash() == hash {
+			log.Printf("[FUSE] Closing handle for removed torrent: %s", key)
+			h.Close()
+			fs.handles.Delete(key)
+		}
+		return true
+	})
+	// Invalidate dir cache so Readdir reflects the deletion immediately
+	fs.InvalidateDirCache(fs.dataDir)
+}
+
 func (fs *BitTorrentFS) getOrReadMeta(path string) (*stub.StubMeta, error) {
 	if val, ok := fs.metaCache.Load(path); ok {
 		return val.(*stub.StubMeta), nil

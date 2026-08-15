@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"bittorrentfs/internal/config"
@@ -26,6 +27,10 @@ var (
 	dataDir    string
 	configPath string
 	verbose    bool
+
+	// torrentHashes maps .torrent file path → info hash hex, so deletion can
+	// look up the hash after the file is gone.
+	torrentHashes sync.Map
 )
 
 // Execute is the main entry point for the CLI.
@@ -117,6 +122,11 @@ func Execute() {
 		for _, e := range entries {
 			if !e.IsDir() && strings.HasSuffix(e.Name(), ".torrent") {
 				fullPath := filepath.Join(cfg.DataDir, e.Name())
+				// Track for deletion detection
+				if info, infoErr := os.Stat(fullPath); infoErr == nil {
+					knownTorrents.Store(fullPath, info.ModTime())
+					log.Printf("[Start] Tracking torrent for cleanup: %s", e.Name())
+				}
 				log.Printf("[Start] Found existing torrent: %s", e.Name())
 				stubs, err := addTorrent(cfg.DataDir, fullPath)
 				if err != nil {
@@ -147,6 +157,10 @@ func Execute() {
 			log.Printf("[Watch] Failed to process torrent: %v", err)
 			return
 		}
+		// Track for deletion detection (addTorrent stores hash, but also track path here)
+		if info, infoErr := os.Stat(path); infoErr == nil {
+			knownTorrents.Store(path, info.ModTime())
+		}
 		// Pre-wake for new torrents too
 		for _, stubPath := range stubs {
 			meta, parseErr := stub.ParseStub(stubPath)
@@ -159,6 +173,8 @@ func Execute() {
 				log.Printf("[Watch] Pre-wake failed for %s: %v", filepath.Base(path), wakeErr)
 			}
 		}
+	}, func(path string) {
+		removeTorrent(cfg.DataDir, path, client, fs, raCache)
 	})
 
 	// Set up signal handler for graceful shutdown
@@ -191,6 +207,14 @@ func addTorrent(dataDir, torrentPath string) ([]string, error) {
 		return nil, fmt.Errorf("create stubs: %w", err)
 	}
 
+	// Store hash for later cleanup on deletion
+	if len(stubs) > 0 {
+		if meta, err := stub.ParseStub(stubs[0]); err == nil {
+			hash := stub.ExtractHash(meta.Magnet)
+			torrentHashes.Store(absPath, hash)
+		}
+	}
+
 	for _, s := range stubs {
 		log.Printf("Created stub: %s", s)
 	}
@@ -205,4 +229,76 @@ func addMagnet(dataDir, magnetURI string) error {
 
 	log.Printf("Created stub: %s", stubPath)
 	return nil
+}
+
+// removeTorrent cleans up a torrent whose .torrent file was deleted from the
+// watched directory. Removes stubs, FUSE handle, DB entry, and cache.
+func removeTorrent(dataDir, torrentPath string, client *streaming.GostormAdapter, fs *fusefs.BitTorrentFS, raCache *streaming.ReadAheadCache) {
+	absPath, err := filepath.Abs(torrentPath)
+	if err != nil {
+		log.Printf("[Watch] Failed to resolve path for removal: %v", err)
+		return
+	}
+
+	// Look up hash from the map (populated at add time)
+	val, ok := torrentHashes.Load(absPath)
+	if !ok {
+		log.Printf("[Watch] No hash recorded for %s, scanning stubs", filepath.Base(absPath))
+		// Fallback: scan all stubs to find matching magnet hash
+		// (handles case where process restarted and map is empty)
+		entries, readErr := os.ReadDir(dataDir)
+		if readErr != nil {
+			return
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			stubDir := filepath.Join(dataDir, e.Name())
+			stubFiles, _ := os.ReadDir(stubDir)
+			for _, sf := range stubFiles {
+				if sf.IsDir() || !strings.HasSuffix(sf.Name(), ".mkv") {
+					continue
+				}
+				meta, parseErr := stub.ParseStub(filepath.Join(stubDir, sf.Name()))
+				if parseErr != nil {
+					continue
+				}
+				h := stub.ExtractHash(meta.Magnet)
+				if h != "" {
+					torrentHashes.Store(absPath, h)
+					val = h
+					ok = true
+					break
+				}
+			}
+			if ok {
+				break
+			}
+		}
+		if !ok {
+			log.Printf("[Watch] Could not determine hash for %s", filepath.Base(absPath))
+			return
+		}
+	}
+
+	hash := val.(string)
+	log.Printf("[Watch] Removing torrent %s (hash=%s)", filepath.Base(absPath), hash[:8])
+
+	// 1. Remove stubs from disk
+	removed := stub.RemoveStubs(dataDir, hash)
+	log.Printf("[Watch] Removed %d stub files", removed)
+
+	// 2. Close FUSE handle for this torrent
+	fs.CloseHandleByHash(hash)
+
+	// 3. Remove torrent from GoStorm engine + DB
+	if err := client.RemoveTorrent(hash); err != nil {
+		log.Printf("[Watch] RemoveTorrent failed: %v", err)
+	}
+
+	// 4. Clean up hash map entry
+	torrentHashes.Delete(absPath)
+
+	log.Printf("[Watch] Cleanup complete for %s", filepath.Base(absPath))
 }
