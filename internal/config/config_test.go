@@ -11,8 +11,8 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.MasterConcurrencyLimit != 25 {
 		t.Errorf("expected concurrency 25, got %d", cfg.MasterConcurrencyLimit)
 	}
-	if cfg.ReadAheadBudgetMB != 256 {
-		t.Errorf("expected read ahead 256MB, got %d", cfg.ReadAheadBudgetMB)
+	if cfg.ReadAheadBudgetMB != 128 {
+		t.Errorf("expected read ahead 128MB, got %d", cfg.ReadAheadBudgetMB)
 	}
 	if cfg.FuseMountPoint == "" {
 		t.Errorf("expected non-empty mount point, got empty")

@@ -137,6 +137,6 @@ func downloadFile(filepath string, url string) error {
 		return fmt.Errorf("write file: %w", err)
 	}
 	
-	fmt.Printf("[BitTorrentFS] Downloaded %.1MB\n", float64(written)/1024/1024)
+	fmt.Printf("[BitTorrentFS] Downloaded %.1fMB\n", float64(written)/1024/1024)
 	return nil
 }
