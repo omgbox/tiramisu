@@ -17,7 +17,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.25'
           cache: true
 
       - name: Install WinFsp SDK
@@ -79,8 +79,8 @@ jobs:
         run: |
           $commit = (git rev-parse --short HEAD)
           $date = (Get-Date -Format "yyyy-MM-dd")
-          $ldflags = "-s -w -extldflags '-static' -X main.version=ci -X main.commit=$commit -X main.date=$date -trimpath"
-          go build -o bittorrentfs.exe -ldflags="$ldflags" -tags="disable_libutp,noboltdb" .
+          $ldflags = "-s -w -extldflags '-static' -X main.version=ci -X main.commit=$commit -X main.date=$date"
+          go build -o bittorrentfs.exe -trimpath -ldflags="$ldflags" -tags="disable_libutp,noboltdb" .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Write-Host "Build successful (commit=$commit, date=$date)"
 
