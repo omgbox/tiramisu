@@ -4,7 +4,7 @@ FUSE streaming engine for BitTorrent. Mount a virtual drive and stream torrents 
 
 ## Features
 
-- **Single binary** — WinFsp DLL embedded, UPX compressed (~6.5MB)
+- **Single binary** — UPX compressed (~6.5MB), requires [WinFsp](https://winfsp.dev/)
 - **FUSE virtual filesystem** — mounts as a drive letter (T:)
 - **Adaptive read-ahead** — learns player access patterns, dual-stream prefetch
 - **Multi-torrent** — 8+ concurrent streams
@@ -29,11 +29,11 @@ Automate video transcoding pipelines. Point your transcoder at the FUSE mount �
 Use as a disposable filesystem for testing torrent clients, validating `.torrent` files, or demonstrating BitTorrent protocols without touching disk.
 
 ### Portable Streaming
-Single 6.5MB binary with no installation. Copy to a USB drive, run on any Windows machine. WinFsp DLL auto-extracts on first run.
+Single 6.5MB binary. Copy to any Windows machine with [WinFsp](https://winfsp.dev/) installed.
 
 ## Requirements
 
-- **Windows 10/11** (WinFsp auto-extracted on first run)
+- **Windows 10/11** with [WinFsp](https://winfsp.dev/) installed
 
 ## Download
 
