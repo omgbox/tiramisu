@@ -29,11 +29,11 @@ Automate video transcoding pipelines. Point your transcoder at the FUSE mount â€
 Use as a disposable filesystem for testing torrent clients, validating `.torrent` files, or demonstrating BitTorrent protocols without touching disk.
 
 ### Portable Streaming
-Single 6.5MB binary. Copy to any Windows machine with [WinFsp](https://winfsp.dev/) installed.
+Single 6.5MB binary. Copy to any Windows machine with [WinFsp](https://winfsp.dev/) v2.1+ installed.
 
 ## Requirements
 
-- **Windows 10/11** with [WinFsp](https://winfsp.dev/) installed
+- **Windows 10/11** with [WinFsp](https://winfsp.dev/) v2.1+ installed
 
 ## Download
 
